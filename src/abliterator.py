@@ -130,7 +130,11 @@ class ModelAbliterator:
         torch.set_grad_enabled(False)
 
         self.model = HookedTransformer.from_pretrained_no_processing(
-            model, n_devices=n_devices, device=device, dtype=torch.bfloat16, default_padding_side="left"
+            model,
+            n_devices=n_devices,
+            device=device,
+            dtype=torch.bfloat16,
+            default_padding_side="left",
         )
 
         self.model.requires_grad_(False)

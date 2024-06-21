@@ -1,22 +1,21 @@
 name: abliteration
 channels:
-  - nvidia
-  - pytorch 
   - defaults
   - conda-forge
 dependencies:
   - pip
   - black
-  - python
-  - pytorch 
-  - torchaudio 
-  - torchvision 
-  - scikit-learn
-  - pytorch-cuda=12.1
+  - python=3.11
   - pip:
+    - -i https://pypi.tuna.tsinghua.edu.cn/simple
     - einops 
     - tiktoken 
     - jaxtyping
+    - ipykernel
+    - IProgress 
+    - ipywidgets
+    - jupyterlab
     - transformers 
+    - scikit-learn
     - transformer_lens 
     - transformers_stream_generator 
