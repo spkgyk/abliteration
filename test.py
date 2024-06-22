@@ -1,16 +1,29 @@
-import torch
+from transformers import AutoTokenizer
 
-torch.set_grad_enabled(False)
-from transformer_lens import HookedTransformer
+# Load the tokenizer (replace 'bert-base-uncased' with the tokenizer you are using)
+tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen1.5-4B-Chat")
 
-model = "meta-llama/Meta-Llama-3-8B-Instruct"
+# Words to tokenize
+words = [
+    " cannot",
+    " sorry",
+    "However",
+    " unsafe",
+    "danger",
+    "'t",
+]
 
-torch.cuda.empty_cache()
-HookedTransformer.from_pretrained_no_processing(
-    model,
-    device="cuda",
-    dtype=torch.bfloat16,
-    default_padding_side="left",
-)
+# words = ["A", "To", "Here", "Certainly", "Absolutely"]
 
-print("Got here")
+# Tokenize the words
+token_ids = tokenizer(words, add_special_tokens=False)["input_ids"]
+
+print([item for sublist in token_ids for item in sublist])
+
+# Print the tokens and their corresponding IDs
+for word, token_id in zip(words, token_ids):
+    tokens = tokenizer.convert_ids_to_tokens(token_id)
+    print(f"Word: {word}")
+    print(f"Token IDs: {token_id}")
+    print(f"Tokens: {tokens}")
+    print("-" * 30)
