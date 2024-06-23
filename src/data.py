@@ -2,7 +2,7 @@ from datasets import load_dataset
 
 
 def reformat_texts(texts):
-    return [[{"role": "user", "content": text}] for text in texts]
+    return [[{"role": "user", "content": text}] for text in texts[:1000]]
 
 
 def get_harmful_instructions():
