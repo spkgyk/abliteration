@@ -168,7 +168,7 @@ class Abliterator:
 
         return self.decode_tokens(all_tokens[:, seq_len:])
 
-    def get_generations(self, instructions: List[str], fwd_hooks=[], batch_size: int = 4) -> List[str]:
+    def generate(self, instructions: List[str], fwd_hooks=[], batch_size: int = 4) -> List[str]:
         generations = []
         for i in tqdm(range(0, len(instructions), batch_size)):
             tokens = get_input_ids(tokenizer=self.model.tokenizer, instructions=instructions[i : i + batch_size])
