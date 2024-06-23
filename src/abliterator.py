@@ -156,14 +156,17 @@ class Abliterator:
         self.refusal_directions.sort(key=lambda x: x["refusal_direction_mean"], reverse=True)
 
     def _generate_with_hooks(self, tokens: Int[Tensor, "batch_size seq_len"], fwd_hooks=[]) -> List[str]:
-        all_tokens = torch.zeros((tokens.shape[0], tokens.shape[1] + self.max_tokens_generated), dtype=torch.long, device=tokens.device)
-        all_tokens[:, : tokens.shape[1]] = tokens
+        batch_size, seq_len = tokens.shape
+        all_tokens = torch.zeros((batch_size, seq_len + self.max_tokens_generated), dtype=torch.long, device=tokens.device)
+        all_tokens[:, :seq_len] = tokens
+
         for i in range(self.max_tokens_generated):
             with self.model.hooks(fwd_hooks=fwd_hooks):
-                logits = self.model(all_tokens[:, : -self.max_tokens_generated + i])
+                logits = self.model(all_tokens[:, : seq_len + i])
                 next_tokens = logits[:, -1, :].argmax(dim=-1)  # greedy sampling (temperature=0)
-                all_tokens[:, -self.max_tokens_generated + i] = next_tokens
-        return self.decode_tokens(all_tokens[:, tokens.shape[1] :])
+                all_tokens[:, seq_len + i] = next_tokens
+
+        return self.decode_tokens(all_tokens[:, seq_len:])
 
     def get_generations(self, instructions: List[str], fwd_hooks=[], batch_size: int = 4) -> List[str]:
         generations = []
