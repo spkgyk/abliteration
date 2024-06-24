@@ -182,7 +182,7 @@ class Abliterator:
                 elif pbar:
                     pbar.set_description(f"Still generating {sum(generating)} results")
                 else:
-                    print(f"Still generating {sum(generating)} results")
+                    print(f"Still generating {sum(generating)} results", end="\r")
 
         return self.decode_tokens(tokens_batch=all_tokens[:, seq_len:].cpu())
 
