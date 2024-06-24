@@ -11,7 +11,7 @@ import functools
 import torch
 
 from .hooks import direction_ablation_hook
-from .utils import clear_mem
+from .utils import clear_mem, subset_cache
 
 torch.set_grad_enabled(False)
 
@@ -74,16 +74,13 @@ class Abliterator:
             instructions=data["harmless"][0][: self.n_inst_train],
         )
 
-        self.cache_activations()
-        self.calculate_refusal_directions()
-
-    def cache_activations(self, position=-1):
+    def cache_activations(self, position: int = -1, eps: float = 1e-8):
         # Define batch size based on available VRAM
         batch_size = 32
 
         # Initialize defaultdicts to store activations
-        self.harmful_cache = defaultdict(list)
-        self.harmless_cache = defaultdict(list)
+        harmful = defaultdict(list)
+        harmless = defaultdict(list)
 
         # Process the training data in batches
         num_batches = (self.n_inst_train + batch_size - 1) // batch_size
@@ -105,28 +102,26 @@ class Abliterator:
 
             # Collect and store the activations
             for key in harmful_cache:
-                self.harmful_cache[key].append(harmful_cache[key][:, position, :].cpu())
-                self.harmless_cache[key].append(harmless_cache[key][:, position, :].cpu())
+                harmful[key].append(harmful_cache[key][:, position, :].cpu())
+                harmless[key].append(harmless_cache[key][:, position, :].cpu())
 
             # Flush RAM and VRAM
             del harmful_logits, harmless_logits, harmful_cache, harmless_cache
             clear_mem()
 
         # Concatenate the cached activations
-        self.harmful_cache = {k: torch.cat(v).mean(dim=0) for k, v in self.harmful_cache.items()}
-        self.harmless_cache = {k: torch.cat(v).mean(dim=0) for k, v in self.harmless_cache.items()}
-
-    def calculate_refusal_directions(self, eps: float = 1e-8):
+        harmful = {k: torch.cat(v).mean(dim=0) for k, v in harmful.items()}
+        harmless = {k: torch.cat(v).mean(dim=0) for k, v in harmless.items()}
 
         self.refusal_directions = []
 
-        for layer_num in tqdm(range(1, self.model.cfg.n_layers), desc="Calculating refusal directions"):
+        for layer_num in range(1, self.model.cfg.n_layers):
             for act_name in self.activation_layers:
                 cache_key = utils.get_act_name(act_name, layer_num)
 
                 # calculate mean across batch dim, on the position of the next generated token
-                harmful_mean: torch.Tensor = self.harmful_cache[cache_key]
-                harmless_mean: torch.Tensor = self.harmless_cache[cache_key]
+                harmful_mean: torch.Tensor = harmful[cache_key]
+                harmless_mean: torch.Tensor = harmless[cache_key]
 
                 refusal_direction = harmful_mean - harmless_mean
                 normalized_refusal_direction = refusal_direction / (refusal_direction.norm() + eps)
@@ -140,27 +135,47 @@ class Abliterator:
                     }
                 )
 
-        del self.harmful_cache, self.harmless_cache
+        del harmful, harmless
         clear_mem()
 
         self.refusal_directions.sort(key=lambda x: x["refusal_direction_mean"], reverse=True)
 
     def _generate_with_hooks(self, tokens: Int[Tensor, "batch_size seq_len"], fwd_hooks=[]) -> List[str]:
         batch_size, seq_len = tokens.shape
-        all_tokens = torch.zeros((batch_size, seq_len + self.max_tokens_generated), dtype=torch.long, device=tokens.device)
+        all_tokens = torch.full(
+            (batch_size, seq_len + self.max_tokens_generated), self.model.tokenizer.eos_token_id, dtype=torch.long, device=tokens.device
+        )
         all_tokens[:, :seq_len] = tokens
 
+        generating = list(range(batch_size))
         cache = HookedTransformerKeyValueCache.init_cache(self.model.cfg, self.model.cfg.device, batch_size)
+        generating_cache = None
 
-        for i in range(self.max_tokens_generated):
+        for i in tqdm(range(self.max_tokens_generated)):
             with self.model.hooks(fwd_hooks=fwd_hooks):
                 if i == 0:
                     logits = self.model(all_tokens[:, : seq_len + i], past_kv_cache=cache)
                 else:
-                    logits = self.model(all_tokens[:, seq_len + i - 1 : seq_len + i], past_kv_cache=cache)
+                    logits = self.model(all_tokens[generating, seq_len + i - 1].unsqueeze(1), past_kv_cache=generating_cache)
 
-                next_tokens = logits[:, -1, :].argmax(dim=-1)  # greedy sampling (temperature=0)
-                all_tokens[:, seq_len + i] = next_tokens
+                # Greedy sampling (temperature=0)
+                next_tokens = logits[:, -1, :].argmax(dim=-1).to(all_tokens.device)
+                all_tokens[generating, seq_len + i] = next_tokens
+
+                # Update generating list to exclude sequences that hit the eos token
+                new = []
+                x = []
+                for j in range(len(generating)):
+                    idx = generating[j]
+                    if all_tokens[idx, seq_len + i] != self.model.tokenizer.eos_token_id:
+                        new.append(idx)
+                        x.append(j)
+                generating = new
+
+                generating_cache = subset_cache(generating_cache or cache, x)
+
+                if all(next_tokens == self.model.tokenizer.eos_token_id):
+                    break
 
         return self.decode_tokens(tokens_batch=all_tokens[:, seq_len:])
 
