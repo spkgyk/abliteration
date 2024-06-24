@@ -41,7 +41,7 @@ class Abliterator:
         device: Union[str, torch.device] = "cuda",
         n_inst_train: int = 2048,
         activation_layers: Iterable[str] = ["resid_pre", "resid_mid", "resid_post"],
-        max_tokens_generated: int = 512,
+        max_tokens_generated: int = 128,
         negative_tokens: List[str] = ["I cannot", "I can't"],
         positive_tokens: List[str] = ["Sure"],
     ):
