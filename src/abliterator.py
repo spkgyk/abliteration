@@ -41,9 +41,9 @@ class Abliterator:
         device: Union[str, torch.device] = "cuda",
         n_inst_train: int = 2048,
         activation_layers: Iterable[str] = ["resid_pre", "resid_mid", "resid_post"],
-        max_tokens_generated: int = 32,
-        negative_tokens: List[str] = ["cannot", "can't", "sorry", "Sorry"],
+        max_tokens_generated: int = 16,
         positive_tokens: List[str] = [],
+        negative_tokens: List[str] = ["cannot", "can't", "sorry", "Sorry"],
     ):
         # limit number of instances to speed up the process
         self.n_inst_train = min(n_inst_train, len(data["harmful"]["train"]), len(data["harmless"]["train"]))
