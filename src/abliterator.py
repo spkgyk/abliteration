@@ -1,4 +1,5 @@
-from transformer_lens import HookedTransformer, utils, HookedTransformerKeyValueCache
+from transformer_lens.utils import get_act_name
+from transformer_lens import HookedTransformer
 from transformers import PreTrainedTokenizer
 from typing import Union, Iterable, List
 from collections import defaultdict
@@ -10,8 +11,8 @@ from torch import Tensor
 import functools
 import torch
 
+from .utils import clear_mem, EnhancedHookedTransformerKeyValueCache
 from .hooks import direction_ablation_hook
-from .utils import clear_mem, subset_cache
 
 torch.set_grad_enabled(False)
 
@@ -117,7 +118,7 @@ class Abliterator:
 
         for layer_num in range(1, self.model.cfg.n_layers):
             for act_name in self.activation_layers:
-                cache_key = utils.get_act_name(act_name, layer_num)
+                cache_key = get_act_name(act_name, layer_num)
 
                 # calculate mean across batch dim, on the position of the next generated token
                 harmful_mean: torch.Tensor = harmful[cache_key]
@@ -147,34 +148,27 @@ class Abliterator:
         )
         all_tokens[:, :seq_len] = tokens
 
-        generating = list(range(batch_size))
-        cache = HookedTransformerKeyValueCache.init_cache(self.model.cfg, self.model.cfg.device, batch_size)
-        generating_cache = None
+        generating = torch.ones(batch_size, dtype=torch.bool)
+        cache = EnhancedHookedTransformerKeyValueCache.init_cache(self.model.cfg, self.model.cfg.device, batch_size)
 
-        for i in tqdm(range(self.max_tokens_generated)):
+        for i in range(self.max_tokens_generated):
             with self.model.hooks(fwd_hooks=fwd_hooks):
                 if i == 0:
                     logits = self.model(all_tokens[:, : seq_len + i], past_kv_cache=cache)
                 else:
-                    logits = self.model(all_tokens[generating, seq_len + i - 1].unsqueeze(1), past_kv_cache=generating_cache)
+                    logits = self.model(all_tokens[generating, seq_len + i - 1].unsqueeze(1), past_kv_cache=cache)
 
                 # Greedy sampling (temperature=0)
                 next_tokens = logits[:, -1, :].argmax(dim=-1).to(all_tokens.device)
                 all_tokens[generating, seq_len + i] = next_tokens
 
-                # Update generating list to exclude sequences that hit the eos token
-                new = []
-                x = []
-                for j in range(len(generating)):
-                    idx = generating[j]
-                    if all_tokens[idx, seq_len + i] != self.model.tokenizer.eos_token_id:
-                        new.append(idx)
-                        x.append(j)
-                generating = new
+                # Update generating mask to exclude sequences that hit the eos token
+                generating.clone()[generating] = next_tokens != self.model.tokenizer.eos_token_id
 
-                generating_cache = subset_cache(generating_cache or cache, x)
+                # Update cache
+                cache = cache.subset(generating)
 
-                if all(next_tokens == self.model.tokenizer.eos_token_id):
+                if not generating.any():
                     break
 
         return self.decode_tokens(tokens_batch=all_tokens[:, seq_len:])
@@ -192,7 +186,7 @@ class Abliterator:
     def get_fwd_hooks(self, refusal_direction):
         hook_fn = functools.partial(direction_ablation_hook, direction=refusal_direction)
         fwd_hooks = [
-            (utils.get_act_name(act_name, layer), hook_fn)
+            (get_act_name(act_name, layer), hook_fn)
             for layer in list(range(self.model.cfg.n_layers))
             for act_name in self.activation_layers
         ]
