@@ -41,9 +41,9 @@ class Abliterator:
         device: Union[str, torch.device] = "cuda",
         n_inst_train: int = 2048,
         activation_layers: Iterable[str] = ["resid_pre", "resid_mid", "resid_post"],
-        max_tokens_generated: int = 128,
-        negative_tokens: List[str] = ["I cannot", "I can't"],
-        positive_tokens: List[str] = ["Sure"],
+        max_tokens_generated: int = 32,
+        negative_tokens: List[str] = ["cannot", "can't", "sorry", "Sorry"],
+        positive_tokens: List[str] = [],
     ):
         # limit number of instances to speed up the process
         self.n_inst_train = min(n_inst_train, len(data["harmful"]["train"]), len(data["harmless"]["train"]))
@@ -209,25 +209,22 @@ class Abliterator:
         pbar = tqdm(self.refusal_directions[:N])
         for refusal_direction in pbar:
             fwd_hooks = self.get_fwd_hooks(refusal_direction["refusal_direction"])
-            intervention_generations.append(self.generate(instructions, fwd_hooks=fwd_hooks, pbar=pbar))
+            refusal_direction["intervention_generation"] = self.generate(instructions, fwd_hooks=fwd_hooks, pbar=pbar)
+            intervention_generations.append(refusal_direction)
 
         return intervention_generations
 
     def aggregate_best_layers(self, intervention_generations: List[List[str]]):
 
-        layer_rankings = defaultdict(int)
+        layer_rankings = []
 
-        for layer_candidate in range(len(intervention_generations)):
-            for example in range(len(intervention_generations[layer_candidate])):
-                count = sum(word not in intervention_generations[layer_candidate][example] for word in self.negative_tokens) + sum(
-                    word in intervention_generations[layer_candidate][example] for word in self.positive_tokens
-                )
-                layer_rankings[layer_candidate] += count
+        for layer_candidate in intervention_generations:
+            count = 0
+            for example in layer_candidate["intervention_generation"]:
+                count += sum(word not in example for word in self.negative_tokens) + sum(word in example for word in self.positive_tokens)
+            layer_candidate["count"] = count
+            layer_rankings.append(layer_candidate)
 
-        sorted_layer_rankings = sorted(
-            [{"layer": k, "count": v} for k, v in layer_rankings.items()],
-            key=lambda x: x["count"],
-            reverse=True,
-        )
+        layer_rankings = sorted(layer_rankings, key=lambda x: x["count"], reverse=True)
 
-        return sorted_layer_rankings
+        return layer_rankings
