@@ -39,16 +39,18 @@ class Abliterator:
         model_name: Union[str, Path],
         data: dict,
         device: Union[str, torch.device] = "cuda",
-        n_inst_train: int = 256,
-        n_inst_test: int = 8,
+        n_inst_train: int = 2048,
         activation_layers: Iterable[str] = ["resid_pre", "resid_mid", "resid_post"],
-        max_tokens_generated: int = 128,
+        max_tokens_generated: int = 512,
+        negative_tokens: List[str] = ["I cannot", "I can't"],
+        positive_tokens: List[str] = ["Sure"],
     ):
         # limit number of instances to speed up the process
-        self.n_inst_train = min(n_inst_train, len(data["harmful"][0]), len(data["harmless"][0]))
-        self.n_inst_test = n_inst_test
+        self.n_inst_train = min(n_inst_train, len(data["harmful"]["train"]), len(data["harmless"]["train"]))
         self.activation_layers = set(activation_layers or ["resid_pre", "resid_mid", "resid_post"])
         self.max_tokens_generated = max_tokens_generated
+        self.positive_tokens = positive_tokens
+        self.negative_tokens = negative_tokens
 
         # load model as HookedTransformer from transformer_lens
         self.model = HookedTransformer.from_pretrained_no_processing(
@@ -68,12 +70,12 @@ class Abliterator:
         # Tokenize datasets
         self.harmful_tokens = get_input_ids(
             tokenizer=self.model.tokenizer,
-            instructions=data["harmful"][0][: self.n_inst_train],
-        )
+            instructions=data["harmful"]["train"][: self.n_inst_train],
+        ).to(self.model.cfg.device)
         self.harmless_tokens = get_input_ids(
             tokenizer=self.model.tokenizer,
-            instructions=data["harmless"][0][: self.n_inst_train],
-        )
+            instructions=data["harmless"]["train"][: self.n_inst_train],
+        ).to(self.model.cfg.device)
 
     def cache_activations(self, position: int = -1, eps: float = 1e-8):
         # Define batch size based on available VRAM
@@ -132,7 +134,7 @@ class Abliterator:
                         "act_name": act_name,
                         "layer_num": layer_num,
                         "refusal_direction": normalized_refusal_direction,
-                        "refusal_direction_mean": abs(normalized_refusal_direction.mean()),
+                        "refusal_direction_mean": abs(normalized_refusal_direction).mean(),
                     }
                 )
 
@@ -141,14 +143,18 @@ class Abliterator:
 
         self.refusal_directions.sort(key=lambda x: x["refusal_direction_mean"], reverse=True)
 
-    def _generate_with_hooks(self, tokens: Int[Tensor, "batch_size seq_len"], fwd_hooks=[]) -> List[str]:
+    def _generate_with_hooks(self, tokens: Int[Tensor, "batch_size seq_len"], fwd_hooks=[], pbar: tqdm = None) -> List[str]:
         batch_size, seq_len = tokens.shape
+
         all_tokens = torch.full(
-            (batch_size, seq_len + self.max_tokens_generated), self.model.tokenizer.eos_token_id, dtype=torch.long, device=tokens.device
+            (batch_size, seq_len + self.max_tokens_generated),
+            self.model.tokenizer.eos_token_id,
+            dtype=torch.long,
+            device=self.model.cfg.device,
         )
         all_tokens[:, :seq_len] = tokens
 
-        generating = torch.ones(batch_size, dtype=torch.bool)
+        generating = torch.ones(batch_size, dtype=torch.bool, requires_grad=False, device=self.model.cfg.device)
         cache = EnhancedHookedTransformerKeyValueCache.init_cache(self.model.cfg, self.model.cfg.device, batch_size)
 
         for i in range(self.max_tokens_generated):
@@ -159,28 +165,34 @@ class Abliterator:
                     logits = self.model(all_tokens[generating, seq_len + i - 1].unsqueeze(1), past_kv_cache=cache)
 
                 # Greedy sampling (temperature=0)
-                next_tokens = logits[:, -1, :].argmax(dim=-1).to(all_tokens.device)
+                next_tokens = logits[:, -1, :].argmax(dim=-1)
                 all_tokens[generating, seq_len + i] = next_tokens
 
                 # Update generating mask to exclude sequences that hit the eos token
-                generating.clone()[generating] = next_tokens != self.model.tokenizer.eos_token_id
+                subset = next_tokens != self.model.tokenizer.eos_token_id
+                _clone = generating.clone()
+                _clone[generating] = subset
+                generating = _clone
 
                 # Update cache
-                cache = cache.subset(generating)
+                cache = cache.subset(subset)
 
                 if not generating.any():
                     break
+                elif pbar:
+                    pbar.set_description(f"Still generating {sum(generating)} results")
+                else:
+                    print(f"Still generating {sum(generating)} results")
 
-        return self.decode_tokens(tokens_batch=all_tokens[:, seq_len:])
+        return self.decode_tokens(tokens_batch=all_tokens[:, seq_len:].cpu())
 
-    def generate(self, instructions: List[str], fwd_hooks=[], batch_size: int = 8) -> List[str]:
+    def generate(self, instructions: List[str], fwd_hooks=[], batch_size: int = 8, pbar: tqdm = None) -> List[str]:
         generations = []
-        _range = range(0, len(instructions), batch_size)
-        pbar = tqdm(_range) if len(instructions) > batch_size else _range
-        for i in pbar:
+
+        for i in range(0, len(instructions), batch_size):
             tokens = get_input_ids(tokenizer=self.model.tokenizer, instructions=instructions[i : i + batch_size])
-            generation = self._generate_with_hooks(tokens, fwd_hooks=fwd_hooks)
-            generations.extend(generation)
+            generation = self._generate_with_hooks(tokens, fwd_hooks=fwd_hooks, pbar=pbar)
+            generations.extend([g.strip() for g in generation])
         return generations
 
     def get_fwd_hooks(self, refusal_direction):
@@ -194,8 +206,24 @@ class Abliterator:
 
     def test_top_N_directions(self, instructions: List[str], N: int = 10):
         intervention_generations = []
-        for refusal_direction in tqdm(self.refusal_directions[:N]):
+        pbar = tqdm(self.refusal_directions[:N])
+        for refusal_direction in pbar:
             fwd_hooks = self.get_fwd_hooks(refusal_direction["refusal_direction"])
-            intervention_generations.append(self.generate(instructions, fwd_hooks=fwd_hooks))
+            intervention_generations.append(self.generate(instructions, fwd_hooks=fwd_hooks, pbar=pbar))
 
         return intervention_generations
+
+    def aggregate_best_layers(self, intervention_generations: List[List[str]]):
+
+        layer_rankings = defaultdict(int)
+
+        for layer_candidate in range(len(intervention_generations)):
+            for example in range(len(intervention_generations[layer_candidate])):
+                count = sum(word not in intervention_generations[layer_candidate][example] for word in self.negative_tokens) + sum(
+                    word in intervention_generations[layer_candidate][example] for word in self.positive_tokens
+                )
+                layer_rankings[layer_candidate] += count
+
+        sorted_layer_rankings = sorted(layer_rankings.items(), key=lambda x: x[1], reverse=True)
+
+        return sorted_layer_rankings
