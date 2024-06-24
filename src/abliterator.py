@@ -224,6 +224,10 @@ class Abliterator:
                 )
                 layer_rankings[layer_candidate] += count
 
-        sorted_layer_rankings = sorted(layer_rankings.items(), key=lambda x: x[1], reverse=True)
+        sorted_layer_rankings = sorted(
+            [{"layer": k, "count": v} for k, v in layer_rankings.items()],
+            key=lambda x: x["count"],
+            reverse=True,
+        )
 
         return sorted_layer_rankings
