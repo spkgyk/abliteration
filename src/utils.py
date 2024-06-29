@@ -1,6 +1,7 @@
 from transformer_lens import HookedTransformerKeyValueCache, HookedTransformerKeyValueCacheEntry, HookedTransformerConfig
-from typing import Iterable, List, Union
-from jaxtyping import Bool
+from transformers import PreTrainedTokenizer
+from typing import Iterable, Union
+from jaxtyping import Bool, Int
 
 import torch
 import gc
@@ -9,6 +10,22 @@ import gc
 def clear_mem():
     gc.collect()
     torch.cuda.empty_cache()
+
+
+def get_input_ids(
+    tokenizer: PreTrainedTokenizer,
+    instructions: Iterable[str],
+    device: torch.device = None,
+) -> Int[torch.Tensor, "batch_size seq_len"]:
+    device = device or torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    return tokenizer.apply_chat_template(
+        instructions,
+        padding=True,
+        truncation=False,
+        return_tensors="pt",
+        return_dict=True,
+        add_generation_prompt=True,
+    ).input_ids.to(device)
 
 
 class EnhancedHookedTransformerKeyValueCache(HookedTransformerKeyValueCache):
