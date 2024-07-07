@@ -7,7 +7,6 @@ dependencies:
   - black
   - python=3.11
   - pip:
-    - -i https://pypi.tuna.tsinghua.edu.cn/simple
     - einops 
     - tiktoken 
     - jaxtyping
