@@ -16,11 +16,37 @@ from .utils import clear_mem, EnhancedHookedTransformerKeyValueCache, get_input_
 from .hooks import direction_ablation_hook, get_orthogonalized_matrix
 from .data import HarmfulHarmlessData
 
+torch.inference_mode()
 torch.set_grad_enabled(False)
 
 
 def decode(tokenizer: PreTrainedTokenizer, tokens_batch: torch.Tensor) -> List[str]:
     return tokenizer.batch_decode(tokens_batch, skip_special_tokens=True)
+
+
+# valid_act_names = [
+#     "hook_embed",
+#     "blocks.0.hook_resid_pre",  # this one
+#     "blocks.0.ln1.hook_scale",
+#     "blocks.0.ln1.hook_normalized",
+#     "blocks.0.attn.hook_q",
+#     "blocks.0.attn.hook_k",
+#     "blocks.0.attn.hook_v",
+#     "blocks.0.attn.hook_rot_q",
+#     "blocks.0.attn.hook_rot_k",
+#     "blocks.0.attn.hook_attn_scores",
+#     "blocks.0.attn.hook_pattern",
+#     "blocks.0.attn.hook_z",
+#     "blocks.0.hook_attn_out",  # this one
+#     "blocks.0.hook_resid_mid",
+#     "blocks.0.ln2.hook_scale",
+#     "blocks.0.ln2.hook_normalized",
+#     "blocks.0.mlp.hook_pre",
+#     "blocks.0.mlp.hook_pre_linear",
+#     "blocks.0.mlp.hook_post",
+#     "blocks.0.hook_mlp_out",  # this one
+#     "blocks.0.hook_resid_post",  # this one
+# ]
 
 
 class Abliterator:
@@ -29,9 +55,9 @@ class Abliterator:
         self,
         model_name: Union[str, Path],
         device: Union[str, torch.device] = torch.device(0),
-        activation_layers: Iterable[str] = ["resid_pre", "resid_mid", "resid_post"],
+        activation_layers: Iterable[str] = ["resid_pre", "resid_post", "attn_out", "mlp_out"],
         max_tokens_generated: int = 16,
-        positive_tokens: List[str] = [],
+        positive_tokens: List[str] = ["Sure"],
         negative_tokens: List[str] = ["I cannot", "I can't", "I'm sorry", "Sorry", "I don't", "crime", "not ethical"],
         batch_size: int = 16,
     ):
@@ -39,7 +65,7 @@ class Abliterator:
         self.model_name = model_name
         self.modified = False
         self.modified_layers = defaultdict(list)
-        self.activation_layers = set(activation_layers or ["resid_pre", "resid_mid", "resid_post"])
+        self.activation_layers = set(activation_layers)
         self.max_tokens_generated = max_tokens_generated
         self.positive_tokens = positive_tokens
         self.negative_tokens = negative_tokens
@@ -61,6 +87,9 @@ class Abliterator:
         # assign decode tokens fn for later
         self.decode_tokens = functools.partial(decode, tokenizer=self.model.tokenizer)
 
+    def name_filter(self, activation_name: str):
+        return ".0." not in activation_name and any(act_layer in activation_name for act_layer in self.activation_layers)
+
     def cache_activations(self, data: HarmfulHarmlessData, position: int = -1, eps: float = 1e-8):
         # Initialize defaultdicts to store activations
         harmful = defaultdict(list)
@@ -75,19 +104,21 @@ class Abliterator:
             # Run models on harmful and harmless prompts, cache activations
             _, harmful_cache = self.model.run_with_cache(
                 data.harmful_tokens[start_idx:end_idx],
-                names_filter=lambda hook_name: "resid" in hook_name,
-                reset_hooks_end=True,
+                names_filter=self.name_filter,
+                pos_slice=position,
             )
             _, harmless_cache = self.model.run_with_cache(
                 data.harmless_tokens[start_idx:end_idx],
-                names_filter=lambda hook_name: "resid" in hook_name,
-                reset_hooks_end=True,
+                names_filter=self.name_filter,
+                pos_slice=position,
             )
 
+            assert harmful_cache.keys() == harmless_cache.keys()
+
             # Collect and store the activations
-            for key in harmful_cache:
-                harmful[key].append(harmful_cache[key][:, position, :].cpu())
-                harmless[key].append(harmless_cache[key][:, position, :].cpu())
+            for cache_key in harmful_cache.keys():
+                harmful[cache_key].append(harmful_cache[cache_key].squeeze().cpu())
+                harmless[cache_key].append(harmless_cache[cache_key].squeeze().cpu())
 
             # Flush RAM and VRAM
             del _, harmful_cache, harmless_cache
@@ -97,32 +128,26 @@ class Abliterator:
         harmful = {k: torch.cat(v).mean(dim=0) for k, v in harmful.items()}
         harmless = {k: torch.cat(v).mean(dim=0) for k, v in harmless.items()}
 
+        self.cache_keys = list(harmful.keys())
         self.refusal_directions = []
 
-        for layer_num in range(1, self.model.cfg.n_layers):
-            for act_name in self.activation_layers:
-                cache_key = get_act_name(act_name, layer_num)
+        for cache_key in harmful.keys():
+            # calculate mean across batch dim, on the position of the next generated token
+            harmful_mean: torch.Tensor = harmful[cache_key]
+            harmless_mean: torch.Tensor = harmless[cache_key]
 
-                # calculate mean across batch dim, on the position of the next generated token
-                harmful_mean: torch.Tensor = harmful[cache_key]
-                harmless_mean: torch.Tensor = harmless[cache_key]
+            refusal_direction = harmful_mean - harmless_mean
+            normalized_refusal_direction = refusal_direction / (refusal_direction.norm() + eps)
 
-                refusal_direction = harmful_mean - harmless_mean
-                normalized_refusal_direction = refusal_direction / (refusal_direction.norm() + eps)
-
-                self.refusal_directions.append(
-                    {
-                        "act_name": act_name,
-                        "layer_num": layer_num,
-                        "refusal_direction": normalized_refusal_direction,
-                        "refusal_direction_mean": abs(normalized_refusal_direction.mean()),
-                    }
-                )
+            self.refusal_directions.append(
+                {
+                    "cache_key": cache_key,
+                    "refusal_direction": normalized_refusal_direction,
+                }
+            )
 
         del harmful, harmless
         clear_mem()
-
-        self.refusal_directions.sort(key=lambda x: x["refusal_direction_mean"], reverse=True)
 
     def _generate_with_hooks(
         self,
@@ -132,6 +157,7 @@ class Abliterator:
         batch_num: int = 0,
         num_batches: int = 1,
         pbar: tqdm = None,
+        cache_key: str = None,
     ) -> List[str]:
         batch_size, seq_len = tokens.shape
 
@@ -169,59 +195,67 @@ class Abliterator:
                 if not generating.any():
                     break
                 elif pbar:
-                    pbar.set_description(f"Batch {batch_num+1}/{num_batches} still generating {sum(generating)} results")
+                    if cache_key:
+                        pbar.set_description(
+                            f"Activation '{cache_key}', batch {batch_num+1}/{num_batches} still generating {sum(generating)} results"
+                        )
+                    else:
+                        pbar.set_description(f"Batch {batch_num+1}/{num_batches} still generating {sum(generating)} results")
                 else:
-                    print(f"Batch {batch_num+1}/{num_batches} still generating {sum(generating)} results...", end="\r")
+                    if cache_key:
+                        print(
+                            f"Activation '{cache_key}', batch {batch_num+1}/{num_batches} still generating {sum(generating)} results...",
+                            end="\r",
+                        )
+                    else:
+                        print(f"Batch {batch_num+1}/{num_batches} still generating {sum(generating)} results...", end="\r")
 
         return self.decode_tokens(tokens_batch=all_tokens[:, seq_len:].cpu())
 
-    def generate(self, instructions: List[str], max_tokens_generated=None, fwd_hooks=[], pbar: tqdm = None) -> List[str]:
+    def generate(
+        self,
+        instructions: List[str],
+        max_tokens_generated=None,
+        fwd_hooks=[],
+        pbar: tqdm = None,
+        cache_key: str = None,
+    ) -> List[str]:
         generations = []
 
         max_tokens_generated = max_tokens_generated or self.max_tokens_generated
         num_batches = (len(instructions) + self.batch_size - 1) // self.batch_size
         for batch_num, i in enumerate(range(0, len(instructions), self.batch_size)):
             tokens = get_input_ids(tokenizer=self.model.tokenizer, instructions=instructions[i : i + self.batch_size])
-            generation = self._generate_with_hooks(tokens, fwd_hooks, max_tokens_generated, batch_num, num_batches, pbar)
+            generation = self._generate_with_hooks(tokens, fwd_hooks, max_tokens_generated, batch_num, num_batches, pbar, cache_key)
             generations.extend([g.strip() for g in generation])
+
         return generations
 
-    def get_fwd_hooks(self, refusal_direction: torch.Tensor):
-        hook_fn = functools.partial(direction_ablation_hook, direction=refusal_direction)
-        fwd_hooks = [
-            (get_act_name(act_name, layer), hook_fn)
-            for layer in list(range(self.model.cfg.n_layers))
-            for act_name in self.activation_layers
-        ]
-        return fwd_hooks
-
-    def test_top_N_directions(self, instructions: List[str], N: int = 10):
-        intervention_generations = []
-        pbar = tqdm(self.refusal_directions[:N])
+    def test_refusal_directions(self, instructions: List[str]):
+        pbar = tqdm(self.refusal_directions)
         for refusal_direction in pbar:
-            fwd_hooks = self.get_fwd_hooks(refusal_direction["refusal_direction"])
-            refusal_direction["intervention_generation"] = self.generate(instructions, fwd_hooks=fwd_hooks, pbar=pbar)
-            intervention_generations.append(refusal_direction)
-
-        self.refusal_directions = intervention_generations
+            hook_fn = functools.partial(direction_ablation_hook, direction=refusal_direction["refusal_direction"])
+            fwd_hooks = [(cache_key, hook_fn) for cache_key in self.cache_keys]
+            refusal_direction["intervention_generation"] = self.generate(
+                instructions,
+                fwd_hooks=fwd_hooks,
+                pbar=pbar,
+                cache_key=refusal_direction["cache_key"],
+            )
 
         return self.refusal_directions
 
     def aggregate_best_layers(self, intervention_generations: List[Dict] = None):
 
         intervention_generations = intervention_generations or self.refusal_directions
-
-        layer_rankings = []
-
         for layer_candidate in intervention_generations:
             count = 0
             for example in layer_candidate["intervention_generation"]:
                 count += sum(word not in example for word in self.negative_tokens) + sum(word in example for word in self.positive_tokens)
             layer_candidate["count"] = count
-            layer_rankings.append(layer_candidate)
 
-        layer_rankings = sorted(layer_rankings, key=lambda x: x["count"], reverse=True)
-        self.refusal_directions = layer_rankings
+        intervention_generations = sorted(intervention_generations, key=lambda x: x["count"], reverse=True)
+        self.refusal_directions = intervention_generations
 
         return self.refusal_directions
 
@@ -231,11 +265,7 @@ class Abliterator:
         if attn_output or mlp:
             self.modified = True
 
-        pbar = tqdm(layer_rankings)
-        for refusal_direction in pbar:
-            pbar.set_description(
-                f"Ablating using direction from layer #{refusal_direction['layer_num']}, activation {refusal_direction['act_name']}"
-            )
+        for refusal_direction in layer_rankings:
             refusal_direction: torch.Tensor = refusal_direction["refusal_direction"]
 
             for layer in tqdm(layers, leave=False):
