@@ -28,12 +28,12 @@ class Abliterator:
     def __init__(
         self,
         model_name: Union[str, Path],
-        device: Union[str, torch.device] = torch.device("cuda"),
+        device: Union[str, torch.device] = torch.device(0),
         activation_layers: Iterable[str] = ["resid_pre", "resid_mid", "resid_post"],
         max_tokens_generated: int = 16,
         positive_tokens: List[str] = [],
-        negative_tokens: List[str] = ["I cannot", "I can't", "I'm sorry", "Sorry", "I don't", "crime"],
-        batch_size: int = 8,
+        negative_tokens: List[str] = ["I cannot", "I can't", "I'm sorry", "Sorry", "I don't", "crime", "not ethical"],
+        batch_size: int = 16,
     ):
         # limit number of instances to speed up the process
         self.model_name = model_name
@@ -48,8 +48,9 @@ class Abliterator:
         # load model as HookedTransformer from transformer_lens
         self.model = HookedTransformer.from_pretrained_no_processing(
             model_name=self.model_name,
-            device=device,
+            device_map=device,
             dtype=torch.bfloat16,
+            trust_remote_code=True,
             default_padding_side="left",
         )
 
@@ -72,12 +73,12 @@ class Abliterator:
             end_idx = min(data.n_inst_train, start_idx + self.batch_size)
 
             # Run models on harmful and harmless prompts, cache activations
-            harmful_logits, harmful_cache = self.model.run_with_cache(
+            _, harmful_cache = self.model.run_with_cache(
                 data.harmful_tokens[start_idx:end_idx],
                 names_filter=lambda hook_name: "resid" in hook_name,
                 reset_hooks_end=True,
             )
-            harmless_logits, harmless_cache = self.model.run_with_cache(
+            _, harmless_cache = self.model.run_with_cache(
                 data.harmless_tokens[start_idx:end_idx],
                 names_filter=lambda hook_name: "resid" in hook_name,
                 reset_hooks_end=True,
@@ -89,7 +90,7 @@ class Abliterator:
                 harmless[key].append(harmless_cache[key][:, position, :].cpu())
 
             # Flush RAM and VRAM
-            del harmful_logits, harmless_logits, harmful_cache, harmless_cache
+            del _, harmful_cache, harmless_cache
             clear_mem()
 
         # Concatenate the cached activations
@@ -114,7 +115,7 @@ class Abliterator:
                         "act_name": act_name,
                         "layer_num": layer_num,
                         "refusal_direction": normalized_refusal_direction,
-                        "refusal_direction_mean": abs(normalized_refusal_direction).mean(),
+                        "refusal_direction_mean": abs(normalized_refusal_direction.mean()),
                     }
                 )
 
@@ -127,6 +128,7 @@ class Abliterator:
         self,
         tokens: Int[torch.Tensor, "batch_size seq_len"],
         fwd_hooks=[],
+        max_tokens_generated=None,
         batch_num: int = 0,
         num_batches: int = 1,
         pbar: tqdm = None,
@@ -134,7 +136,7 @@ class Abliterator:
         batch_size, seq_len = tokens.shape
 
         all_tokens = torch.full(
-            (batch_size, seq_len + self.max_tokens_generated),
+            (batch_size, seq_len + max_tokens_generated),
             self.model.tokenizer.eos_token_id,
             dtype=torch.long,
             device=self.model.cfg.device,
@@ -144,7 +146,7 @@ class Abliterator:
         generating = torch.ones(batch_size, dtype=torch.bool, requires_grad=False, device=self.model.cfg.device)
         cache = EnhancedHookedTransformerKeyValueCache.init_cache(self.model.cfg, self.model.cfg.device, batch_size)
 
-        for i in range(self.max_tokens_generated):
+        for i in range(max_tokens_generated):
             with self.model.hooks(fwd_hooks=fwd_hooks):
                 if i == 0:
                     logits = self.model(all_tokens[:, : seq_len + i], past_kv_cache=cache)
@@ -173,13 +175,14 @@ class Abliterator:
 
         return self.decode_tokens(tokens_batch=all_tokens[:, seq_len:].cpu())
 
-    def generate(self, instructions: List[str], fwd_hooks=[], pbar: tqdm = None) -> List[str]:
+    def generate(self, instructions: List[str], max_tokens_generated=None, fwd_hooks=[], pbar: tqdm = None) -> List[str]:
         generations = []
 
+        max_tokens_generated = max_tokens_generated or self.max_tokens_generated
         num_batches = (len(instructions) + self.batch_size - 1) // self.batch_size
         for batch_num, i in enumerate(range(0, len(instructions), self.batch_size)):
             tokens = get_input_ids(tokenizer=self.model.tokenizer, instructions=instructions[i : i + self.batch_size])
-            generation = self._generate_with_hooks(tokens, fwd_hooks=fwd_hooks, batch_num=batch_num, num_batches=num_batches, pbar=pbar)
+            generation = self._generate_with_hooks(tokens, fwd_hooks, max_tokens_generated, batch_num, num_batches, pbar)
             generations.extend([g.strip() for g in generation])
         return generations
 
@@ -261,4 +264,4 @@ class Abliterator:
                 torch.transpose(state_dict[f"blocks.{l}.mlp.W_out"], 0, 1).contiguous()
             )
 
-        hf_model.push_to_hub(f"{self.model_name}-abliterated")
+        hf_model.push_to_hub(f"{self.model_name.split('/',1)[-1]}-uncensored")
