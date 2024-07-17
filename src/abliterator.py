@@ -1,20 +1,23 @@
-from transformers import PreTrainedTokenizer, AutoModelForCausalLM
-from transformer_lens.components import TransformerBlock
-from transformer_lens.utils import get_act_name
-from typing import Union, Iterable, List, Dict
-from transformer_lens import HookedTransformer
+from transformers import (
+    PreTrainedTokenizerFast,
+    AutoModelForCausalLM,
+    PreTrainedTokenizer,
+    GenerationConfig,
+    PreTrainedModel,
+    AutoTokenizer,
+)
+from typing import Union, Iterable, List, Dict, Callable
 from collections import defaultdict
 from tqdm.auto import tqdm
-from jaxtyping import Int
 from pathlib import Path
 
 import functools
 import einops
 import torch
 
-from .utils import clear_mem, EnhancedHookedTransformerKeyValueCache, get_input_ids
 from .hooks import direction_ablation_hook, get_orthogonalized_matrix
 from .data import HarmfulHarmlessData
+from .utils import clear_mem
 
 torch.inference_mode()
 torch.set_grad_enabled(False)
@@ -24,29 +27,20 @@ def decode(tokenizer: PreTrainedTokenizer, tokens_batch: torch.Tensor) -> List[s
     return tokenizer.batch_decode(tokens_batch, skip_special_tokens=True)
 
 
-# valid_act_names = [
-#     "hook_embed",
-#     "blocks.0.hook_resid_pre",  # this one
-#     "blocks.0.ln1.hook_scale",
-#     "blocks.0.ln1.hook_normalized",
-#     "blocks.0.attn.hook_q",
-#     "blocks.0.attn.hook_k",
-#     "blocks.0.attn.hook_v",
-#     "blocks.0.attn.hook_rot_q",
-#     "blocks.0.attn.hook_rot_k",
-#     "blocks.0.attn.hook_attn_scores",
-#     "blocks.0.attn.hook_pattern",
-#     "blocks.0.attn.hook_z",
-#     "blocks.0.hook_attn_out",  # this one
-#     "blocks.0.hook_resid_mid",
-#     "blocks.0.ln2.hook_scale",
-#     "blocks.0.ln2.hook_normalized",
-#     "blocks.0.mlp.hook_pre",
-#     "blocks.0.mlp.hook_pre_linear",
-#     "blocks.0.mlp.hook_post",
-#     "blocks.0.hook_mlp_out",  # this one
-#     "blocks.0.hook_resid_post",  # this one
-# ]
+def encode(
+    tokenizer: PreTrainedTokenizerFast,
+    device: torch.device,
+    instructions: Iterable[str],
+) -> torch.Tensor:
+    device = device or torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    return tokenizer.apply_chat_template(
+        instructions,
+        padding=True,
+        truncation=False,
+        return_tensors="pt",
+        return_dict=True,
+        add_generation_prompt=True,
+    ).input_ids.to(device)
 
 
 class Abliterator:
@@ -54,7 +48,7 @@ class Abliterator:
     def __init__(
         self,
         model_name: Union[str, Path],
-        device: Union[str, torch.device] = torch.device(0),
+        device: Union[str, torch.device] = "auto",
         activation_layers: Iterable[str] = ["resid_pre", "resid_post", "attn_out", "mlp_out"],
         max_tokens_generated: int = 16,
         positive_tokens: List[str] = ["Sure"],
@@ -71,24 +65,60 @@ class Abliterator:
         self.negative_tokens = negative_tokens
         self.batch_size = batch_size
 
-        # load model as HookedTransformer from transformer_lens
-        self.model = HookedTransformer.from_pretrained_no_processing(
-            model_name=self.model_name,
+        self.model: PreTrainedModel = AutoModelForCausalLM.from_pretrained(
+            model_name,
             device_map=device,
-            dtype=torch.bfloat16,
+            torch_dtype=torch.bfloat16,
             trust_remote_code=True,
-            default_padding_side="left",
+        )
+        self.tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
+        self.tokenizer.padding_side = "left"
+        self.tokenizer.pad_token = self.tokenizer.eos_token
+
+        self.encode_tokens = functools.partial(encode, tokenizer=self.tokenizer, device=self.model.device)
+        self.decode_tokens = functools.partial(decode, tokenizer=self.tokenizer)
+
+        self.generation_config = GenerationConfig(
+            do_sample=False,
+            num_beams=1,
         )
 
-        # padding on the left (start of sentence)
-        self.model.tokenizer.padding_side = "left"
-        self.model.tokenizer.pad_token = self.model.tokenizer.eos_token
+    def save_activation(self, activations, name, position):
+        def hook(module, input, output):
+            activations[name].append(output[:, position, :].detach().cpu())
 
-        # assign decode tokens fn for later
-        self.decode_tokens = functools.partial(decode, tokenizer=self.model.tokenizer)
+        return hook
 
-    def name_filter(self, activation_name: str):
-        return ".0." not in activation_name and any(act_layer in activation_name for act_layer in self.activation_layers)
+    def save_pre_activation(self, activations, name, position):
+        def hook(module, input):
+            activations[name].append(input[0][:, position, :].detach().cpu())
+
+        return hook
+
+    def temporary_hooks(self, activations, position):
+        hooks = []
+        for layer_idx, layer in enumerate(self.model.model.layers):
+            if layer_idx == 0:
+                continue
+            hooks.append(
+                layer.input_layernorm.register_forward_pre_hook(
+                    self.save_pre_activation(activations, f"blocks.{layer_idx}.hook_resid_pre", position)
+                )
+            )
+            hooks.append(
+                layer.self_attn.o_proj.register_forward_hook(
+                    self.save_activation(activations, f"blocks.{layer_idx}.hook_attn_out", position)
+                )
+            )
+            hooks.append(
+                layer.mlp.down_proj.register_forward_hook(self.save_activation(activations, f"blocks.{layer_idx}.hook_mlp_out", position))
+            )
+            hooks.append(
+                layer.post_attention_layernorm.register_forward_hook(
+                    self.save_activation(activations, f"blocks.{layer_idx}.hook_resid_post", position),
+                )
+            )
+        return hooks
 
     def cache_activations(self, data: HarmfulHarmlessData, position: int = -1, eps: float = 1e-8):
         # Initialize defaultdicts to store activations
@@ -101,27 +131,22 @@ class Abliterator:
             start_idx = i * self.batch_size
             end_idx = min(data.n_inst_train, start_idx + self.batch_size)
 
-            # Run models on harmful and harmless prompts, cache activations
-            _, harmful_cache = self.model.run_with_cache(
-                data.harmful_tokens[start_idx:end_idx],
-                names_filter=self.name_filter,
-                pos_slice=position,
-            )
-            _, harmless_cache = self.model.run_with_cache(
-                data.harmless_tokens[start_idx:end_idx],
-                names_filter=self.name_filter,
-                pos_slice=position,
-            )
+            harmful_inputs = self.encode_tokens(instructions=data.harmful["train"][start_idx:end_idx])
+            harmless_inputs = self.encode_tokens(instructions=data.harmless["train"][start_idx:end_idx])
 
-            assert harmful_cache.keys() == harmless_cache.keys()
+            # Register hooks and run model for harmful prompts
+            hooks = self.temporary_hooks(harmful, position)
+            self.model.generate(inputs=harmful_inputs, max_new_tokens=1, generation_config=self.generation_config)
+            for hook in hooks:
+                hook.remove()
 
-            # Collect and store the activations
-            for cache_key in harmful_cache.keys():
-                harmful[cache_key].append(harmful_cache[cache_key].squeeze().cpu())
-                harmless[cache_key].append(harmless_cache[cache_key].squeeze().cpu())
+            # Register hooks and run model for harmless prompts
+            hooks = self.temporary_hooks(harmless, position)
+            self.model.generate(inputs=harmless_inputs, max_new_tokens=1, generation_config=self.generation_config)
+            for hook in hooks:
+                hook.remove()
 
             # Flush RAM and VRAM
-            del _, harmful_cache, harmless_cache
             clear_mem()
 
         # Concatenate the cached activations
@@ -149,99 +174,45 @@ class Abliterator:
         del harmful, harmless
         clear_mem()
 
-    def _generate_with_hooks(
-        self,
-        tokens: Int[torch.Tensor, "batch_size seq_len"],
-        fwd_hooks=[],
-        max_tokens_generated=None,
-        batch_num: int = 0,
-        num_batches: int = 1,
-        pbar: tqdm = None,
-        cache_key: str = None,
-    ) -> List[str]:
-        batch_size, seq_len = tokens.shape
+    def _generate_with_hook(self, tokens: torch.Tensor, hook_fn: Callable = None, max_tokens_generated=None) -> List[str]:
 
-        all_tokens = torch.full(
-            (batch_size, seq_len + max_tokens_generated),
-            self.model.tokenizer.eos_token_id,
-            dtype=torch.long,
-            device=self.model.cfg.device,
+        hooks = []
+        if hook_fn:
+            for layer in self.model.model.layers:
+                hooks.append(layer.register_forward_hook(hook_fn))
+
+        output_sequences = self.model.generate(
+            input_ids=tokens,
+            max_new_tokens=max_tokens_generated,
+            generation_config=self.generation_config,
         )
-        all_tokens[:, :seq_len] = tokens
 
-        generating = torch.ones(batch_size, dtype=torch.bool, requires_grad=False, device=self.model.cfg.device)
-        cache = EnhancedHookedTransformerKeyValueCache.init_cache(self.model.cfg, self.model.cfg.device, batch_size)
+        for hook_fn in hooks:
+            hook_fn.remove()
 
-        for i in range(max_tokens_generated):
-            with self.model.hooks(fwd_hooks=fwd_hooks):
-                if i == 0:
-                    logits = self.model(all_tokens[:, : seq_len + i], past_kv_cache=cache)
-                else:
-                    logits = self.model(all_tokens[generating, seq_len + i - 1].unsqueeze(1), past_kv_cache=cache)
-
-                # Greedy sampling (temperature=0)
-                next_tokens = logits[:, -1, :].argmax(dim=-1)
-                all_tokens[generating, seq_len + i] = next_tokens
-
-                # Update generating mask to exclude sequences that hit the eos token
-                subset = next_tokens != self.model.tokenizer.eos_token_id
-                _clone = generating.clone()
-                _clone[generating] = subset
-                generating = _clone
-
-                # Update cache
-                cache = cache.subset(subset)
-
-                if not generating.any():
-                    break
-                elif pbar:
-                    if cache_key:
-                        pbar.set_description(
-                            f"Activation '{cache_key}', batch {batch_num+1}/{num_batches} still generating {sum(generating)} results"
-                        )
-                    else:
-                        pbar.set_description(f"Batch {batch_num+1}/{num_batches} still generating {sum(generating)} results")
-                else:
-                    if cache_key:
-                        print(
-                            f"Activation '{cache_key}', batch {batch_num+1}/{num_batches} still generating {sum(generating)} results...",
-                            end="\r",
-                        )
-                    else:
-                        print(f"Batch {batch_num+1}/{num_batches} still generating {sum(generating)} results...", end="\r")
-
-        return self.decode_tokens(tokens_batch=all_tokens[:, seq_len:].cpu())
+        return self.decode_tokens(tokens_batch=output_sequences[:, tokens.size(-1) :].detach().cpu())
 
     def generate(
         self,
         instructions: List[str],
-        max_tokens_generated=None,
-        fwd_hooks=[],
-        pbar: tqdm = None,
-        cache_key: str = None,
+        max_tokens_generated: int = None,
+        hook_fn: Callable = None,
     ) -> List[str]:
         generations = []
 
         max_tokens_generated = max_tokens_generated or self.max_tokens_generated
-        num_batches = (len(instructions) + self.batch_size - 1) // self.batch_size
-        for batch_num, i in enumerate(range(0, len(instructions), self.batch_size)):
-            tokens = get_input_ids(tokenizer=self.model.tokenizer, instructions=instructions[i : i + self.batch_size])
-            generation = self._generate_with_hooks(tokens, fwd_hooks, max_tokens_generated, batch_num, num_batches, pbar, cache_key)
-            generations.extend([g.strip() for g in generation])
+        for i in range(0, len(instructions), self.batch_size):
+            tokens = self.encode_tokens(instructions=instructions[i : i + self.batch_size])
+            generation = self._generate_with_hook(tokens, hook_fn, max_tokens_generated)
+            generations.extend([g for g in generation])
 
         return generations
 
     def test_refusal_directions(self, instructions: List[str]):
         pbar = tqdm(self.refusal_directions)
         for refusal_direction in pbar:
-            hook_fn = functools.partial(direction_ablation_hook, direction=refusal_direction["refusal_direction"])
-            fwd_hooks = [(cache_key, hook_fn) for cache_key in self.cache_keys]
-            refusal_direction["intervention_generation"] = self.generate(
-                instructions,
-                fwd_hooks=fwd_hooks,
-                pbar=pbar,
-                cache_key=refusal_direction["cache_key"],
-            )
+            hook_fn = direction_ablation_hook(refusal_direction["refusal_direction"])
+            refusal_direction["intervention_generation"] = self.generate(instructions, hook_fn=hook_fn)
 
         return self.refusal_directions
 
@@ -261,22 +232,22 @@ class Abliterator:
 
     def ablate_layers(self, layer_rankings: List[Dict] = None, layers: List[int] = None, attn_output: bool = True, mlp: bool = True):
         layer_rankings = layer_rankings or self.refusal_directions
-        layers = layers or list(range(1, self.model.cfg.n_layers))
+        layers = layers or list(range(1, len(self.model.model.layers)))
         if attn_output or mlp:
             self.modified = True
 
         for refusal_direction in layer_rankings:
-            refusal_direction: torch.Tensor = refusal_direction["refusal_direction"]
+            refusal_direction = refusal_direction["refusal_direction"]
 
             for layer in tqdm(layers, leave=False):
-                block: TransformerBlock = self.model.blocks[layer]
-                if refusal_direction.device != self.model.cfg.device:
-                    refusal_direction = refusal_direction.to(block.attn.W_O.device)
+                block = self.model.model.layers[layer]
+                if refusal_direction.device != self.model.device:
+                    refusal_direction = refusal_direction.to(self.model.device)
                 if attn_output:
-                    block.attn.W_O.data = get_orthogonalized_matrix(block.attn.W_O, refusal_direction)
+                    block.self_attn.o_proj.weight.data = get_orthogonalized_matrix(block.self_attn.o_proj.weight.data, refusal_direction)
                     self.modified_layers["attention_output_layer"].append(layer)
                 if mlp:
-                    block.mlp.W_out.data = get_orthogonalized_matrix(block.mlp.W_out, refusal_direction)
+                    block.mlp.down_proj.weight.data = get_orthogonalized_matrix(block.mlp.down_proj.weight.data, refusal_direction)
                     self.modified_layers["mlp"].append(layer)
 
     def convert_weights(self):

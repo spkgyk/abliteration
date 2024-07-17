@@ -1,9 +1,4 @@
 from datasets import load_dataset, DatasetDict
-from transformers import PreTrainedTokenizer
-
-import torch
-
-from .utils import get_input_ids
 
 
 def reformat_texts(texts):
@@ -17,8 +12,6 @@ class HarmfulHarmlessData:
         self.n_inst_test = n_inst_test
         self.harmful = None
         self.harmless = None
-        self.harmful_tokens = None
-        self.harmless_tokens = None
 
     def _get_harmful_instructions(self):
         dataset = load_dataset("mlabonne/harmful_behaviors")
@@ -47,9 +40,3 @@ class HarmfulHarmlessData:
     def load_data(self):
         self.harmful = self._get_harmful_instructions()
         self.harmless = self._get_harmless_instructions()
-
-    def tokenize_data(self, tokenizer: PreTrainedTokenizer, device: torch.device = torch.device("cuda")):
-        if not self.harmful or not self.harmless:
-            self.load_data()
-        self.harmful_tokens = get_input_ids(tokenizer, self.harmful["train"], device)
-        self.harmless_tokens = get_input_ids(tokenizer, self.harmless["train"], device)

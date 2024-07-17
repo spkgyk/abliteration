@@ -1,65 +1,80 @@
+import random
+
 import torch
-from transformers import AutoModelForCausalLM, AutoTokenizer
+from transformers import AutoTokenizer, AutoModelForCausalLM
 
-# Load model and tokenizer
-model_name = "Qwen/Qwen1.5-4B-Chat"  # Replace with your actual model name
-model = AutoModelForCausalLM.from_pretrained(model_name, device_map="auto", torch_dtype=torch.bfloat16, trust_remote_code=True)
-tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
-tokenizer.padding_side = "left"
+from tqdm import tqdm
 
-# Determine the device
-device = next(model.parameters()).device
+torch.inference_mode()
 
-# Prepare the input
-input_text = "Hello, how are you?"
-inputs = tokenizer(input_text, return_tensors="pt").to(device)
+torch.set_default_device("cuda")
 
-# Dictionary to store activations
-activations = {}
+# MODEL_ID = "stabilityai/stablelm-2-1_6b"
+# MODEL_ID = "stabilityai/stablelm-2-zephyr-1_6b"
+# MODEL_ID = "Qwen/Qwen1.5-1.8B-Chat"
+# MODEL_ID = "Qwen/Qwen-1_8B-chat"
+MODEL_ID = "Qwen/Qwen1.5-4B-Chat"
+# MODEL_ID = "google/gemma-1.1-7b-it"
+# MODEL_ID = "meta-llama/Meta-Llama-3-8B-Instruct"
+
+model = AutoModelForCausalLM.from_pretrained(MODEL_ID, trust_remote_code=True, device_map="auto", torch_dtype=torch.bfloat16)
+tokenizer = AutoTokenizer.from_pretrained(MODEL_ID, trust_remote_code=True)
+
+instructions = 1000
+layer_idx = int(len(model.model.layers) * 0.6)
+pos = -1
+
+print("Instruction count: " + str(instructions))
+print("Layer index: " + str(layer_idx))
+
+with open("harmful.txt", "r") as f:
+    harmful = f.readlines()
+
+with open("harmless.txt", "r") as f:
+    harmless = f.readlines()
+
+harmful_instructions = random.sample(harmful, len(harmful))
+harmless_instructions = random.sample(harmless, instructions)
+
+harmful_toks = [
+    tokenizer.apply_chat_template(conversation=[{"role": "user", "content": insn}], add_generation_prompt=True, return_tensors="pt")
+    for insn in harmful_instructions
+]
+harmless_toks = [
+    tokenizer.apply_chat_template(conversation=[{"role": "user", "content": insn}], add_generation_prompt=True, return_tensors="pt")
+    for insn in harmless_instructions
+]
+
+max_its = len(harmful_toks) + len(harmless_toks)
+bar = tqdm(total=max_its)
 
 
-# Hook function to save activations
-def save_activation(name):
-    def hook(module, input, output):
-        print(f"Hook called for: {name}")
-        activations[name] = output.detach().cpu()
-
-    return hook
-
-
-def save_pre_activation(name):
-    def hook(module, input):
-        print(f"Pre-hook called for: {name}")
-        activations[name] = input[0].detach().cpu()
-
-    return hook
+def generate(toks):
+    bar.update(n=1)
+    return (
+        model.generate(toks.to(model.device), use_cache=False, max_new_tokens=1, return_dict_in_generate=True, output_hidden_states=True)
+        .hidden_states[0][layer_idx][:, pos, :]
+        .detach()
+        .cpu()
+    )
 
 
-# Register hooks
-for layer_idx, layer in enumerate(model.model.layers):
-    # Print the layer being hooked
-    print(f"Registering hooks for layer {layer_idx}")
+harmful_outputs = [generate(toks) for toks in harmful_toks]
+harmless_outputs = [generate(toks) for toks in harmless_toks]
 
-    # Hook for hook_resid_pre (input to the block)
-    layer.input_layernorm.register_forward_pre_hook(save_pre_activation(f"blocks.{layer_idx}.hook_resid_pre"))
+bar.close()
 
-    # Hook for hook_attn_out (output of the attention mechanism)
-    layer.self_attn.o_proj.register_forward_hook(save_activation(f"blocks.{layer_idx}.hook_attn_out"))
 
-    # Hook for hook_mlp_out (output of the MLP)
-    layer.mlp.down_proj.register_forward_hook(save_activation(f"blocks.{layer_idx}.hook_mlp_out"))
+print(harmful_outputs)
 
-    # Hook for hook_resid_post (final output of the block)
-    layer.post_attention_layernorm.register_forward_hook(save_activation(f"blocks.{layer_idx}.hook_resid_post"))
+harmful_mean = torch.stack(harmful_outputs).mean(dim=0)
+harmless_mean = torch.stack(harmless_outputs).mean(dim=0)
 
-# Move model and inputs to device if available
-model.to(device)
-inputs = {k: v.to(device) for k, v in inputs.items()}
+print(harmful_mean)
 
-# Forward pass to get activations
-with torch.no_grad():
-    outputs = model(**inputs)
+refusal_dir = harmful_mean - harmless_mean
+refusal_dir = refusal_dir / refusal_dir.norm()
 
-# Print the activations
-for name, activation in activations.items():
-    print(f"{name}: shape {activation.shape}")
+print(refusal_dir)
+
+torch.save(refusal_dir, MODEL_ID.replace("/", "_") + "_refusal_dir.pt")
