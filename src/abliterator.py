@@ -1,16 +1,14 @@
 from transformers import (
-    PreTrainedTokenizerFast,
     AutoModelForCausalLM,
     PreTrainedTokenizer,
     GenerationConfig,
     PreTrainedModel,
     AutoTokenizer,
 )
-from typing import Union, Iterable, List, Dict, Callable
+from typing import Union, List, Dict, Callable
 from collections import defaultdict
 from tqdm.auto import tqdm
 from pathlib import Path
-import functools
 import torch
 
 from .hooks import direction_ablation_hook, get_orthogonalized_matrix
@@ -27,7 +25,7 @@ class Abliterator:
         model_name: Union[str, Path],
         batch_size: int = 16,
         max_tokens_generated: int = 24,
-        device: Union[str, torch.device] = torch.device(0),
+        device: Union[str, torch.device] = "cuda" if torch.cuda.is_available() else "cpu",
         positive_tokens: List[str] = ["Sure", "To", "Certainly"],
         negative_tokens: List[str] = [
             "I cannot",
@@ -48,19 +46,15 @@ class Abliterator:
         self.model_name = model_name
         self.batch_size = batch_size
         self.max_tokens_generated = max_tokens_generated
+        self.device = torch.device(device)
         self.positive_tokens = positive_tokens
         self.negative_tokens = negative_tokens
-
         self.modified = False
         self.modified_layers = defaultdict(list)
+        self.refusal_directions = []
 
-        self.device = device if isinstance(device, torch.device) else torch.device(device)
         self.model = self._load_model()
         self.tokenizer = self._load_tokenizer()
-
-        self.encode_tokens = functools.partial(self._encode, tokenizer=self.tokenizer, device=self.model.device)
-        self.decode_tokens = functools.partial(self._decode, tokenizer=self.tokenizer)
-
         self.generation_config = GenerationConfig(do_sample=False, num_beams=1, pad_token_id=self.tokenizer.pad_token_id)
 
         self._print_model_layers()
@@ -84,24 +78,18 @@ class Abliterator:
             print(layer)
             print("---")
 
-    @staticmethod
-    def _encode(
-        tokenizer: PreTrainedTokenizerFast,
-        device: torch.device,
-        instructions: Iterable[str],
-    ) -> torch.Tensor:
-        return tokenizer.apply_chat_template(
+    def encode_tokens(self, instructions: List[str]) -> torch.Tensor:
+        return self.tokenizer.apply_chat_template(
             instructions,
             padding=True,
             truncation=False,
             return_tensors="pt",
             return_dict=True,
             add_generation_prompt=True,
-        ).input_ids.to(device)
+        ).input_ids.to(self.device)
 
-    @staticmethod
-    def _decode(tokenizer: PreTrainedTokenizer, tokens_batch: torch.Tensor) -> List[str]:
-        return tokenizer.batch_decode(tokens_batch, skip_special_tokens=True)
+    def decode_tokens(self, tokens_batch: torch.Tensor) -> List[str]:
+        return self.tokenizer.batch_decode(tokens_batch, skip_special_tokens=True)
 
     def _create_hook(self, activations: Dict[str, List[torch.Tensor]], name: str, position: int, pre: bool = False):
         def hook(module, input, output=None):
@@ -146,7 +134,7 @@ class Abliterator:
 
         for i in tqdm(range(0, len(dataset), self.batch_size), desc=f"Caching {dataset_name} activations"):
             batch = dataset[i : i + self.batch_size]
-            inputs = self.encode_tokens(instructions=batch)
+            inputs = self.encode_tokens(batch)
             self.model.generate(inputs=inputs, max_new_tokens=1, generation_config=self.generation_config)
             clear_mem()
 
@@ -176,7 +164,7 @@ class Abliterator:
 
         for i in range(0, len(instructions), self.batch_size):
             batch = instructions[i : i + self.batch_size]
-            tokens = self.encode_tokens(instructions=batch)
+            tokens = self.encode_tokens(batch)
 
             output_sequences = self.model.generate(
                 input_ids=tokens,
@@ -184,7 +172,7 @@ class Abliterator:
                 generation_config=self.generation_config,
             )
             output_sequences = output_sequences[:, tokens.size(-1) :].detach().cpu()
-            generations.extend(self.decode_tokens(tokens_batch=output_sequences))
+            generations.extend(self.decode_tokens(output_sequences))
 
         for hook in hooks:
             hook.remove()
@@ -197,16 +185,15 @@ class Abliterator:
             refusal_direction["intervention_generation"] = self.generate(instructions, hook_fn=hook_fn)
         return self.refusal_directions
 
-    def aggregate_best_layers(self, intervention_generations: List[Dict] = None):
-        intervention_generations = intervention_generations or self.refusal_directions
-        for layer_candidate in intervention_generations:
+    def aggregate_best_layers(self):
+        for layer_candidate in self.refusal_directions:
             count = sum(
                 sum(word not in example for word in self.negative_tokens) + sum(word in example for word in self.positive_tokens)
                 for example in layer_candidate["intervention_generation"]
             )
             layer_candidate["count"] = count
 
-        self.refusal_directions = sorted(intervention_generations, key=lambda x: x["count"], reverse=True)
+        self.refusal_directions.sort(key=lambda x: x["count"], reverse=True)
         return self.refusal_directions
 
     def ablate_layer(self, direction: Dict = None, layers: List[int] = None, attn_output: bool = True, mlp: bool = True):
