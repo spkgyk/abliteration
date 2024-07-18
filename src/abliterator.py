@@ -22,7 +22,6 @@ torch.inference_mode()
 
 
 class Abliterator:
-
     def __init__(
         self,
         model_name: Union[str, Path],
@@ -64,10 +63,7 @@ class Abliterator:
 
         self.generation_config = GenerationConfig(do_sample=False, num_beams=1, pad_token_id=self.tokenizer.pad_token_id)
 
-        for layer_idx, layer in enumerate(self.model.model.layers):
-            print(layer_idx)
-            print(layer)
-            print("---")
+        self._print_model_layers()
 
     def _load_model(self) -> PreTrainedModel:
         return AutoModelForCausalLM.from_pretrained(
@@ -81,6 +77,12 @@ class Abliterator:
         tokenizer = AutoTokenizer.from_pretrained(self.model_name, trust_remote_code=True)
         tokenizer.padding_side = "left"
         return tokenizer
+
+    def _print_model_layers(self):
+        for layer_idx, layer in enumerate(self.model.model.layers):
+            print(f"Layer {layer_idx}:")
+            print(layer)
+            print("---")
 
     @staticmethod
     def _encode(
@@ -109,12 +111,10 @@ class Abliterator:
         return hook
 
     def _register_hooks(self, activations: Dict[str, List[torch.Tensor]], position: int) -> List[Callable]:
-
         useful_layers = max(int(0.5 * len(self.model.model.layers)), 1)
-
         hooks = []
-        for layer_idx, layer in enumerate(self.model.model.layers[useful_layers:], start=useful_layers):
 
+        for layer_idx, layer in enumerate(self.model.model.layers[useful_layers:], start=useful_layers):
             layer_name = f"blocks.{layer_idx}"
             hooks.extend(
                 [
