@@ -1,6 +1,7 @@
 from transformers import (
     AutoModelForCausalLM,
     PreTrainedTokenizer,
+    LlamaForCausalLM,
     GenerationConfig,
     PreTrainedModel,
     AutoTokenizer,
@@ -11,7 +12,7 @@ from tqdm.auto import tqdm
 from pathlib import Path
 import torch
 
-from .hooks import direction_ablation_hook, get_orthogonalized_matrix
+from .hooks import direction_ablation_hook, get_orthogonalized_matrix, get_activation_hook
 from .data import HarmfulHarmlessData
 from .utils import clear_mem
 
@@ -42,6 +43,7 @@ class Abliterator:
             "inappropriate",
             "no justification",
         ],
+        residual_stream_points=[],
     ):
         self.model_name = model_name
         self.batch_size = batch_size
@@ -49,6 +51,7 @@ class Abliterator:
         self.device = torch.device(device)
         self.positive_tokens = positive_tokens
         self.negative_tokens = negative_tokens
+        self.residual_stream_points = residual_stream_points
         self.modified = False
         self.modified_layers = defaultdict(list)
         self.refusal_directions = []
@@ -59,7 +62,7 @@ class Abliterator:
 
         self._print_model_layers()
 
-    def _load_model(self) -> PreTrainedModel:
+    def _load_model(self) -> LlamaForCausalLM:
         return AutoModelForCausalLM.from_pretrained(
             self.model_name,
             device_map=self.device,
@@ -68,8 +71,9 @@ class Abliterator:
         )
 
     def _load_tokenizer(self) -> PreTrainedTokenizer:
-        tokenizer = AutoTokenizer.from_pretrained(self.model_name, trust_remote_code=True)
+        tokenizer = AutoTokenizer.from_pretrained(self.model_name, trust_remote_code=True, add_bos_token=True)
         tokenizer.padding_side = "left"
+        tokenizer.pad_token = tokenizer.eos_token
         return tokenizer
 
     def _print_model_layers(self):
@@ -91,31 +95,21 @@ class Abliterator:
     def decode_tokens(self, tokens_batch: torch.Tensor) -> List[str]:
         return self.tokenizer.batch_decode(tokens_batch, skip_special_tokens=True)
 
-    def _create_hook(self, activations: Dict[str, List[torch.Tensor]], name: str, position: int, pre: bool = False):
-        def hook(module, input, output=None):
-            tensor = input[0] if pre else output
-            activations[name].append(tensor[:, position, :].detach().cpu())
-
-        return hook
-
     def _register_hooks(self, activations: Dict[str, List[torch.Tensor]], position: int) -> List[Callable]:
         useful_layers = max(int(0.5 * len(self.model.model.layers)), 1)
         hooks = []
 
         for layer_idx, layer in enumerate(self.model.model.layers[useful_layers:], start=useful_layers):
-            layer_name = f"blocks.{layer_idx}"
-            hooks.extend(
-                [
-                    layer.input_layernorm.register_forward_pre_hook(
-                        self._create_hook(activations, f"{layer_name}.resid_pre", position, pre=True)
-                    ),
-                    layer.self_attn.o_proj.register_forward_hook(self._create_hook(activations, f"{layer_name}.attn_out", position)),
-                    layer.mlp.down_proj.register_forward_hook(self._create_hook(activations, f"{layer_name}.mlp_out", position)),
-                    layer.post_attention_layernorm.register_forward_hook(
-                        self._create_hook(activations, f"{layer_name}.resid_post", position)
-                    ),
-                ]
-            )
+            layer_name = f"layer.{layer_idx}"
+
+            pre_hook = get_activation_hook(activations, f"{layer_name}.pre_attn_stream", position, pre=True)
+            resid_post_hook = get_activation_hook(activations, f"{layer_name}.pre_mlp_stream", position, pre=True)
+
+            # Collect the residual stream before attention AKA input to input_layernorm.
+            hooks.append(layer.input_layernorm.register_forward_pre_hook(pre_hook))
+            # Collect the residual stream after attention, before mlp AKA input to post_attention_layernorm.
+            hooks.append(layer.post_attention_layernorm.register_forward_pre_hook(resid_post_hook))
+
         return hooks
 
     def cache_activations(self, data: HarmfulHarmlessData, position: int = -1, eps: float = 1e-8):
@@ -151,11 +145,19 @@ class Abliterator:
             for key in self.cache_keys
         ]
 
-    def generate(self, instructions: List[str], max_tokens_generated: int = None, hook_fn: Callable = None) -> List[str]:
+    def generate(
+        self,
+        instructions: List[str],
+        max_tokens_generated: int = None,
+        hook_fn: Callable = None,
+        pbar: tqdm = None,
+        key: str = "",
+    ) -> List[str]:
         generations = []
         hooks = []
 
         if hook_fn:
+            # hooks.append(self.model.model.embed_tokens.register_forward_hook(hook_fn))
             for layer in self.model.model.layers:
                 hooks.append(layer.self_attn.o_proj.register_forward_hook(hook_fn))
                 hooks.append(layer.mlp.down_proj.register_forward_hook(hook_fn))
@@ -174,15 +176,26 @@ class Abliterator:
             output_sequences = output_sequences[:, tokens.size(-1) :].detach().cpu()
             generations.extend(self.decode_tokens(output_sequences))
 
+            if pbar:
+                pbar.set_description(f"Generating while abliterating {key}")
+            elif key:
+                print(f"Generating while abliterating {key}", flush=True)
+
         for hook in hooks:
             hook.remove()
 
         return generations
 
     def test_refusal_directions(self, instructions: List[str]):
-        for refusal_direction in tqdm(self.refusal_directions):
-            hook_fn = direction_ablation_hook(refusal_direction["refusal_direction"])
-            refusal_direction["intervention_generation"] = self.generate(instructions, hook_fn=hook_fn)
+        pbar = tqdm(self.refusal_directions)
+        for refusal_direction in pbar:
+            args = {
+                "instructions": instructions,
+                "hook_fn": direction_ablation_hook(refusal_direction["refusal_direction"]),
+                "pbar": pbar,
+                "key": refusal_direction["cache_key"],
+            }
+            refusal_direction["intervention_generation"] = self.generate(**args)
         return self.refusal_directions
 
     def aggregate_best_layers(self):
@@ -204,6 +217,9 @@ class Abliterator:
             self.modified = True
 
         layers = layers or list(range(1, len(self.model.model.layers)))
+
+        # self.model.model.embed_tokens.weight.data = get_orthogonalized_matrix(self.model.model.embed_tokens.weight.data, refusal_direction)
+
         for layer in layers:
             block = self.model.model.layers[layer]
             if attn_output:

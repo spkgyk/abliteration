@@ -1,5 +1,5 @@
+from typing import Callable, Dict, List, Union
 from functools import wraps
-from typing import Callable
 
 import torch
 
@@ -61,12 +61,26 @@ def get_orthogonalized_matrix(matrix: torch.Tensor, vec: torch.Tensor) -> torch.
         torch.Tensor: The orthogonalized matrix.
     """
     # Compute the projection of vec onto each column of the matrix
-    proj = torch.matmul(vec, matrix)
+    if len(vec) == len(matrix):
+        proj = torch.matmul(vec, matrix)
+    else:
+        proj = torch.matmul(matrix, vec)
 
     # Compute the outer product of vec and proj
     outer_product = torch.outer(vec, proj)
 
     # Subtract the projection from the original matrix
-    result = matrix - outer_product
+    if outer_product.shape == matrix.shape:
+        result = matrix - outer_product
+    else:
+        result = matrix - outer_product.T
 
     return result
+
+
+def get_activation_hook(activations: Dict[str, List[torch.Tensor]], name: str, position: int, pre: bool = False) -> Callable:
+    def hook(module: torch.nn.Module, input: torch.Tensor, output: torch.Tensor = None):
+        tensor = input[0] if pre else output
+        activations[name].append(tensor[:, position, :].detach().cpu())
+
+    return hook
