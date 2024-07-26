@@ -1,13 +1,19 @@
 name: abliteration
 channels:
+  - nvidia
+  - pytorch
   - defaults
   - conda-forge
 dependencies:
   - pip
   - black
   - python=3.11
+  - pytorch 
+  - torchvision 
+  - torchaudio 
+  - pytorch-cuda=12.4
   - pip:
-    - einops
+    - datasets
     - tiktoken 
     - jaxtyping
     - ipykernel
@@ -16,7 +22,6 @@ dependencies:
     - jupyterlab
     - flash-attn
     - accelerate
+    - bitsandbytes
     - transformers 
     - scikit-learn
-    - transformer_lens 
-    - transformers_stream_generator 

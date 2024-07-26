@@ -3,7 +3,6 @@ from transformers import (
     PreTrainedTokenizer,
     LlamaForCausalLM,
     GenerationConfig,
-    PreTrainedModel,
     AutoTokenizer,
 )
 from typing import Union, List, Dict, Callable
@@ -27,21 +26,16 @@ class Abliterator:
         batch_size: int = 16,
         max_tokens_generated: int = 24,
         device: Union[str, torch.device] = "cuda" if torch.cuda.is_available() else "cpu",
-        positive_tokens: List[str] = ["Sure", "To", "Certainly"],
+        positive_tokens: List[str] = ["Sure", "To", "Certainly", "Here are", "I can"],
         negative_tokens: List[str] = [
             "I cannot",
             "I can't",
+            "I can’t",
             "I'm sorry",
-            "Sorry",
+            "I’m sorry",
             "I don't",
-            "crime",
-            "not ethical",
-            "dangerous",
-            "illegal",
-            "unethical",
-            "Combat",
-            "inappropriate",
-            "no justification",
+            "I don’t",
+            "Sorry",
         ],
         residual_stream_points=[],
     ):
@@ -68,11 +62,11 @@ class Abliterator:
             device_map=self.device,
             torch_dtype=torch.bfloat16,
             trust_remote_code=True,
+            attn_implementation="flash_attention_2",
         )
 
     def _load_tokenizer(self) -> PreTrainedTokenizer:
-        tokenizer = AutoTokenizer.from_pretrained(self.model_name, trust_remote_code=True, add_bos_token=True)
-        tokenizer.padding_side = "left"
+        tokenizer = AutoTokenizer.from_pretrained(self.model_name, trust_remote_code=True, add_bos_token=True, padding_side="left")
         tokenizer.pad_token = tokenizer.eos_token
         return tokenizer
 
@@ -96,7 +90,7 @@ class Abliterator:
         return self.tokenizer.batch_decode(tokens_batch, skip_special_tokens=True)
 
     def _register_hooks(self, activations: Dict[str, List[torch.Tensor]], position: int) -> List[Callable]:
-        useful_layers = max(int(0.5 * len(self.model.model.layers)), 1)
+        useful_layers = max(int(0.3 * len(self.model.model.layers)), 1)
         hooks = []
 
         for layer_idx, layer in enumerate(self.model.model.layers[useful_layers:], start=useful_layers):
@@ -157,7 +151,7 @@ class Abliterator:
         hooks = []
 
         if hook_fn:
-            # hooks.append(self.model.model.embed_tokens.register_forward_hook(hook_fn))
+            hooks.append(self.model.model.embed_tokens.register_forward_hook(hook_fn))
             for layer in self.model.model.layers:
                 hooks.append(layer.self_attn.o_proj.register_forward_hook(hook_fn))
                 hooks.append(layer.mlp.down_proj.register_forward_hook(hook_fn))
@@ -209,25 +203,36 @@ class Abliterator:
         self.refusal_directions.sort(key=lambda x: x["count"], reverse=True)
         return self.refusal_directions
 
-    def ablate_layer(self, direction: Dict = None, layers: List[int] = None, attn_output: bool = True, mlp: bool = True):
+    def ablate_layer(
+        self,
+        direction: Dict = None,
+        layers: List[int] = None,
+        emb_out: bool = True,
+        attn_out: bool = True,
+        mlp_out: bool = True,
+    ):
         refusal_direction = direction or self.refusal_directions[0]
         refusal_direction = refusal_direction["refusal_direction"].to(self.device)
 
-        if attn_output or mlp:
+        if emb_out or attn_out or mlp_out:
             self.modified = True
 
         layers = layers or list(range(1, len(self.model.model.layers)))
 
-        # self.model.model.embed_tokens.weight.data = get_orthogonalized_matrix(self.model.model.embed_tokens.weight.data, refusal_direction)
+        if emb_out:
+            self.model.model.embed_tokens.weight.data = get_orthogonalized_matrix(
+                self.model.model.embed_tokens.weight.data, refusal_direction
+            )
+            self.modified_layers["emb_out"] = True
 
         for layer in layers:
             block = self.model.model.layers[layer]
-            if attn_output:
+            if attn_out:
                 block.self_attn.o_proj.weight.data = get_orthogonalized_matrix(block.self_attn.o_proj.weight.data, refusal_direction)
-                self.modified_layers["attention_output_layer"].append(layer)
-            if mlp:
+                self.modified_layers[layer].append("attn_out")
+            if mlp_out:
                 block.mlp.down_proj.weight.data = get_orthogonalized_matrix(block.mlp.down_proj.weight.data, refusal_direction)
-                self.modified_layers["mlp"].append(layer)
+                self.modified_layers[layer].append("mlp_out")
 
     def push_to_hub(self):
         self.model.push_to_hub(f"{self.model_name.split('/',1)[-1]}-uncensored")
