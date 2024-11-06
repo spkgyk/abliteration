@@ -2,6 +2,18 @@
 
 This project is inspired by [FailSpy's abliterator](https://github.com/FailSpy/abliterator) but reimplemented without TransformerLens for improved speed and efficiency. I found the TransformerLens package both slow, memory hungry and limited -- only a few of the most common models were implemented. To bypass this, this repo uses PyTorch hooks to implement the same behaviour. 
 
+## Installation
+
+```bash
+source setup/setup.sh
+```
+
+Note: MacOS users should comment out `pytorch-cuda` and `flash-attn` dependencies.
+
+## Quick Start
+
+See `abliterate.ipynb` for example usage.
+
 ## Overview
 
 Abliteration is a technique that modifies large language model (LLM) behavior by identifying and manipulating specific directions in the model's activation space. The primary application is controlling refusal behavior - the tendency of models to reject certain types of prompts.
@@ -41,17 +53,6 @@ Abliteration can be applied in two ways:
    - Orthogonalizes weights relative to the refusal direction
    - More efficient for production use
 
-## Installation
-
-```bash
-source setup/setup.sh
-```
-
-Note: MacOS users should comment out `pytorch-cuda` and `flash-attn` dependencies.
-
-## Quick Start
-
-See `abliterate.ipynb` for example usage.
 
 ## Technical Details
 
