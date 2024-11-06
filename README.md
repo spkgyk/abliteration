@@ -23,9 +23,9 @@ Let's examine the key components:
 
 The core abliteration operation removes the projection onto the refusal direction:
 
-$$
+```math
 c'_{\text{out}} = c_{\text{out}} - (c_{\text{out}} \cdot \hat{r}) \hat{r}
-$$
+```
 
 ### Implementation Approaches
 
