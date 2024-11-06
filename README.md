@@ -1,1 +1,97 @@
-# abliteration
+# Abliteration
+
+A high-performance PyTorch-based library for model behavior modification through targeted feature ablation. This project is inspired by [FailSpy's abliterator](https://github.com/FailSpy/abliterator) but reimplemented without TransformerLens for improved speed and efficiency.
+
+## Overview
+
+Abliteration is a technique that modifies large language model (LLM) behavior by identifying and manipulating specific directions in the model's activation space. The primary application is controlling refusal behavior - the tendency of models to reject certain types of prompts.
+
+## How It Works
+
+### The Science Behind Abliteration
+
+Recent research has shown that refusal behavior in LLMs can often be traced to a single direction in the model's activation space (Askell et al., 2023). This "refusal vector" consistently activates when the model encounters potentially problematic prompts. By manipulating this vector, we can control how the model responds to such inputs.
+
+### Mathematical Framework
+
+Let's examine the key components:
+
+- $a$ represents the residual stream activation for a given input
+- $\hat{r}$ represents the refusal direction vector
+- $c_{\text{out}}$ represents a component's output before modification
+- $c'_{\text{out}}$ represents the modified output
+
+The core abliteration operation removes the projection onto the refusal direction:
+
+$$
+c'_{\text{out}} = c_{\text{out}} - (c_{\text{out}} \cdot \hat{r}) \hat{r}
+$$
+
+### Implementation Approaches
+
+Abliteration can be applied in two ways:
+
+1. **Runtime Modification**
+   - Dynamically adjusts activations during inference
+   - Non-permanent changes
+   - Useful for experimentation and testing
+
+2. **Weight Modification**
+   - Permanently modifies model weights
+   - Orthogonalizes weights relative to the refusal direction
+   - More efficient for production use
+
+## Installation
+
+```bash
+source setup/setup.sh
+```
+
+Note: MacOS users should comment out `pytorch-cuda` and `flash-attn` dependencies.
+
+## Quick Start
+
+See `abliterate.ipynb` for example usage.
+
+## Core Features
+
+- **Efficient Activation Collection**: Uses PyTorch hooks for minimal overhead
+- **Smart Memory Management**: Batch processing and automatic cleanup
+- **Flexible Direction Computation**: Supports multiple strategies for identifying behavioral directions
+- **Comprehensive Testing Tools**: Built-in evaluation functions
+
+## Technical Details
+
+### Computing the Refusal Vector
+
+For a set of harmful prompts with activations $$a_{\text{harmful}}^{(i)}$$, we calculate the average projection:
+
+$$
+\text{avg\_proj}_{\text{harmful}} = \frac{1}{n} \sum_{i=1}^{n} (a_{\text{harmful}}^{(i)} \cdot \hat{r})
+$$
+
+### Modifying Harmless Prompts
+
+To force refusal on harmless inputs, we align their activations with the harmful average:
+
+$$
+a'_{\text{harmless}} = a_{\text{harmless}} - (a_{\text{harmless}} \cdot \hat{r}) \hat{r} + (\text{avg\_proj}_{\text{harmful}}) \hat{r}
+$$
+
+## Acknowledgments
+
+This project builds upon several key contributions:
+
+- [Refusal in LLMs is Mediated by a Single Direction](https://www.lesswrong.com/posts/jGuXSZgv6qfdhMCuJ/refusal-in-llms-is-mediated-by-a-single-direction) by Amanda Askell et al.
+- [FailSpy's abliterator](https://github.com/FailSpy/abliterator) - The original implementation that inspired this work
+- [Understanding Abliteration](https://huggingface.co/blog/mlabonne/abliteration) by Maxime Labonne - An excellent explanation of the core concepts
+
+Special thanks to the authors of these works for their valuable contributions to the field.
+
+## Contributing
+
+Contributions are welcome! If you find any issues or have improvements to suggest, please submit a PR.
+
+## License
+
+MIT License
