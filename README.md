@@ -4,11 +4,11 @@ This project is inspired by [FailSpy's abliterator](https://github.com/FailSpy/a
 
 ## Installation
 
+Requires conda for easy setup via:
 ```bash
 source setup/setup.sh
 ```
-
-Note: MacOS users should comment out `pytorch-cuda` and `flash-attn` dependencies.
+Note: MacOS users should comment out `pytorch-cuda` and `flash-attn` dependencies. If not using conda, simply install the requirements found in the requirements.yaml file.
 
 ## Quick Start
 
