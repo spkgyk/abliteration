@@ -1,0 +1,27 @@
+name: abliteration
+channels:
+  - nvidia
+  - pytorch
+  - defaults
+  - conda-forge
+dependencies:
+  - pip
+  - black
+  - python=3.11
+  - pytorch
+  - torchvision
+  - torchaudio
+  - pytorch-cuda=12.4
+  - pip:
+      - datasets
+      - tiktoken
+      - jaxtyping
+      - ipykernel
+      - IProgress
+      - ipywidgets
+      - jupyterlab
+      - flash-attn
+      - accelerate
+      - bitsandbytes
+      - transformers
+      - scikit-learn
