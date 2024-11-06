@@ -82,10 +82,10 @@ $$
 
 This project is a small contribution to the fantastic work below:
 
-- [Refusal in LLMs is Mediated by a Single Direction](https://arxiv.org/abs/2406.11717) by Arditi et al. -- the original paper introducing abliteration. 
-- [Refusal in LLMs is mediated by a single direction](https://www.lesswrong.com/posts/jGuXSZgv6qfdhMCuJ/refusal-in-llms-is-mediated-by-a-single-direction) an article by the original authors. 
-- [FailSpy's abliterator](https://github.com/FailSpy/abliterator) - The original GitHub code that open sourced this work
-- [Understanding Abliteration](https://huggingface.co/blog/mlabonne/abliteration) by Maxime Labonne - An excellent explanation of the core concepts
+- [Refusal in LLMs is Mediated by a Single Direction](https://arxiv.org/abs/2406.11717) by Arditi et al. -- the original paper introducing abliteration
+- [Refusal in LLMs is mediated by a single direction](https://www.lesswrong.com/posts/jGuXSZgv6qfdhMCuJ/refusal-in-llms-is-mediated-by-a-single-direction) -- an article by the original authors
+- [FailSpy's abliterator](https://github.com/FailSpy/abliterator) - The original GitHub code that open-sourced this work
+- [Maxime Labonne's Understanding Abliteration](https://huggingface.co/blog/mlabonne/abliteration) - An excellent explanation of the core concepts
 
 
 ## Contributing
@@ -93,5 +93,3 @@ This project is a small contribution to the fantastic work below:
 Contributions are welcome! If you find any issues or have improvements to suggest, please submit a PR.
 
 ## License
-
-MIT License
