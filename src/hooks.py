@@ -1,24 +1,86 @@
-from transformer_lens.hook_points import HookPoint
-from jaxtyping import Float
+from typing import Callable, Dict, List, Union
+from functools import wraps
 
-import einops
 import torch
 
 
-# Inference-time intervention hook
-def direction_ablation_hook(
-    activation: Float[torch.Tensor, "... d_act"],
-    hook: HookPoint,
-    direction: Float[torch.Tensor, "d_act"],
-):
-    if activation.device != direction.device:
-        direction = direction.to(activation.device)
-    proj = einops.einsum(activation, direction.view(-1, 1), "... d_act, d_act single -> ... single") * direction
-    return activation - proj
+def tensor_device_decorator(func):
+    """
+    Decorator to ensure tensors are on the same device before operations.
+    """
+
+    @wraps(func)
+    def wrapper(*args):
+        device = args[0].device
+        args = [arg.to(device) if isinstance(arg, torch.Tensor) else arg for arg in args]
+        return func(*args)
+
+    return wrapper
 
 
-def get_orthogonalized_matrix(
-    matrix: Float[torch.Tensor, "... d_model"], vec: Float[torch.Tensor, "d_model"]
-) -> Float[torch.Tensor, "... d_model"]:
-    proj = einops.einsum(matrix, vec.view(-1, 1), "... d_model, d_model single -> ... single") * vec
-    return matrix - proj
+def direction_ablation_hook(refusal_direction: torch.Tensor) -> Callable:
+    """
+    Creates a hook function for direction ablation.
+
+    Args:
+        refusal_direction (torch.Tensor): The direction to ablate.
+
+    Returns:
+        Callable: A hook function that performs direction ablation.
+    """
+
+    @tensor_device_decorator
+    def _ablate(activation: torch.Tensor, direction: torch.Tensor) -> torch.Tensor:
+        """
+        Ablates the activation in the specified direction.
+
+        Args:
+            activation (torch.Tensor): The activation tensor.
+            direction (torch.Tensor): The direction to ablate.
+
+        Returns:
+            torch.Tensor: The ablated activation.
+        """
+        proj = torch.matmul(activation, direction.unsqueeze(-1)) * direction
+        return activation - proj
+
+    # Return a lambda function that applies the _ablate function
+    return lambda module, input, output: _ablate(output, refusal_direction)
+
+
+@tensor_device_decorator
+def get_orthogonalized_matrix(matrix: torch.Tensor, vec: torch.Tensor) -> torch.Tensor:
+    """
+    Orthogonalizes a matrix with respect to a vector.
+
+    Args:
+        matrix (torch.Tensor): The input matrix to be orthogonalized.
+        vec (torch.Tensor): The vector to orthogonalize against.
+
+    Returns:
+        torch.Tensor: The orthogonalized matrix.
+    """
+    # Compute the projection of vec onto each column of the matrix
+    if len(vec) == len(matrix):
+        proj = torch.matmul(vec, matrix)
+    else:
+        proj = torch.matmul(matrix, vec)
+
+    # Compute the outer product of vec and proj
+    outer_product = torch.outer(vec, proj)
+
+    # Subtract the projection from the original matrix
+    if outer_product.shape == matrix.shape:
+        result = matrix - outer_product
+    else:
+        result = matrix - outer_product.T
+
+    return result
+
+
+def get_activation_hook(activations: Dict[str, List[torch.Tensor]], name: str, position: int, pre: bool = False) -> Callable:
+    def hook(module: torch.nn.Module, input: torch.Tensor, output: torch.Tensor = None):
+        tensor = input[0] if pre else output
+        activations[name].append(tensor[:, position, :].detach().cpu())
+
+    return hook
