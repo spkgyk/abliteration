@@ -10,7 +10,7 @@ Abliteration is a technique that modifies large language model (LLM) behavior by
 
 ### The Science Behind Abliteration
 
-Recent research has shown that refusal behavior in LLMs can often be traced to a single direction in the model's activation space (Askell et al., 2023). This "refusal vector" consistently activates when the model encounters potentially problematic prompts. By manipulating this vector, we can control how the model responds to such inputs.
+Recent research has shown that refusal behavior in LLMs can often be traced to a single direction in the model's activation space (Arditi et al., 2024). This "refusal vector" consistently activates when the model encounters potentially problematic prompts. By manipulating this vector, we can control how the model responds to such inputs.
 
 ### Mathematical Framework
 
@@ -80,13 +80,13 @@ $$
 
 ## Acknowledgments
 
-This project builds upon several key contributions:
+This project is a small contribution to the fantastic work below:
 
-- [Refusal in LLMs is Mediated by a Single Direction](https://www.lesswrong.com/posts/jGuXSZgv6qfdhMCuJ/refusal-in-llms-is-mediated-by-a-single-direction) by Amanda Askell et al.
-- [FailSpy's abliterator](https://github.com/FailSpy/abliterator) - The original implementation that inspired this work
+- [Refusal in LLMs is Mediated by a Single Direction](https://arxiv.org/abs/2406.11717) by Arditi et al. -- the original paper introducing abliteration. 
+- [Refusal in LLMs is mediated by a single direction](https://www.lesswrong.com/posts/jGuXSZgv6qfdhMCuJ/refusal-in-llms-is-mediated-by-a-single-direction) an article by the original authors. 
+- [FailSpy's abliterator](https://github.com/FailSpy/abliterator) - The original GitHub code that open sourced this work
 - [Understanding Abliteration](https://huggingface.co/blog/mlabonne/abliteration) by Maxime Labonne - An excellent explanation of the core concepts
 
-Special thanks to the authors of these works for their valuable contributions to the field.
 
 ## Contributing
 
