@@ -29,7 +29,6 @@ class Abliterator:
         device (Union[str, torch.device]): Device to run the model on
         positive_tokens (List[str]): Tokens indicating positive/desired responses
         negative_tokens (List[str]): Tokens indicating negative/undesired responses
-        residual_stream_points (List): Points in the residual stream to analyze
         modified (bool): Whether the model has been modified through ablation
         modified_layers (defaultdict): Tracks which layers have been modified
         refusal_directions (List): Computed directions for response modification
@@ -52,7 +51,6 @@ class Abliterator:
             "I don’t",
             "Sorry",
         ],
-        residual_stream_points=[],
     ):
         """
         Initialize the Abliterator with model configuration and analysis parameters.
@@ -64,7 +62,6 @@ class Abliterator:
             device: Computing device to use
             positive_tokens: List of tokens indicating desired responses
             negative_tokens: List of tokens indicating undesired responses
-            residual_stream_points: Points in model to collect residual stream activations
         """
         self.model_name = model_name
         self.batch_size = batch_size
@@ -72,7 +69,6 @@ class Abliterator:
         self.device = torch.device(device)
         self.positive_tokens = positive_tokens
         self.negative_tokens = negative_tokens
-        self.residual_stream_points = residual_stream_points
         self.modified = False
         self.modified_layers = defaultdict(list)
         self.refusal_directions = []
@@ -95,7 +91,7 @@ class Abliterator:
             device_map=self.device,
             torch_dtype=torch.bfloat16,
             trust_remote_code=True,
-            attn_implementation="flash_attention_2",
+            attn_implementation="flash_attention_2" if self.device == "cuda" else "sdpa",
         )
 
     def _load_tokenizer(self) -> PreTrainedTokenizer:

@@ -1,12 +1,7 @@
-from datasets import (
-    load_dataset,
-    DatasetDict,
-)
+from datasets import load_dataset, DatasetDict
 
 
-def reformat_texts(
-    texts,
-):
+def reformat_texts(texts):
     """
     Reformats a list of text strings into a list of dictionaries with user role and content.
 
@@ -17,15 +12,7 @@ def reformat_texts(
         List[List[Dict]]: List of lists containing dictionaries with 'role' and 'content' keys.
         Each inner list contains a single dictionary representing a user message.
     """
-    return [
-        [
-            {
-                "role": "user",
-                "content": text,
-            }
-        ]
-        for text in texts
-    ]
+    return [[{"role": "user", "content": text}] for text in texts]
 
 
 class HarmfulHarmlessData:
@@ -46,11 +33,7 @@ class HarmfulHarmlessData:
         harmless (DatasetDict): Dataset containing harmless instructions.
     """
 
-    def __init__(
-        self,
-        n_inst_train: int = 2048,
-        n_inst_test: int = 16,
-    ) -> None:
+    def __init__(self, n_inst_train: int = 2048, n_inst_test: int = 16) -> None:
         """
         Initialize the HarmfulHarmlessData instance.
 
@@ -63,9 +46,7 @@ class HarmfulHarmlessData:
         self.harmful = None
         self.harmless = None
 
-    def _get_harmful_instructions(
-        self,
-    ):
+    def _get_harmful_instructions(self):
         """
         Load and process the harmful instructions dataset.
 
@@ -83,19 +64,11 @@ class HarmfulHarmlessData:
                 "test": reformat_texts(dataset["test"]["text"][: self.n_inst_test]),
             }
         )
-        self.n_inst_train = min(
-            self.n_inst_train,
-            len(dataset["train"]),
-        )
-        self.n_inst_test = min(
-            self.n_inst_test,
-            len(dataset["test"]),
-        )
+        self.n_inst_train = min(self.n_inst_train, len(dataset["train"]))
+        self.n_inst_test = min(self.n_inst_test, len(dataset["test"]))
         return dataset
 
-    def _get_harmless_instructions(
-        self,
-    ):
+    def _get_harmless_instructions(self):
         """
         Load and process the harmless instructions dataset.
 
@@ -113,19 +86,11 @@ class HarmfulHarmlessData:
                 "test": reformat_texts(dataset["test"]["text"][: self.n_inst_test]),
             }
         )
-        self.n_inst_train = min(
-            self.n_inst_train,
-            len(dataset["train"]),
-        )
-        self.n_inst_test = min(
-            self.n_inst_test,
-            len(dataset["test"]),
-        )
+        self.n_inst_train = min(self.n_inst_train, len(dataset["train"]))
+        self.n_inst_test = min(self.n_inst_test, len(dataset["test"]))
         return dataset
 
-    def load_data(
-        self,
-    ):
+    def load_data(self):
         """
         Load both harmful and harmless instruction datasets.
 
