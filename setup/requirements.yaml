@@ -11,7 +11,7 @@ dependencies:
   - pytorch
   - torchvision
   - torchaudio
-  # - pytorch-cuda=12.4
+  - pytorch-cuda=12.4
   - pip:
       - datasets
       - tiktoken
@@ -20,7 +20,7 @@ dependencies:
       - IProgress
       - ipywidgets
       - jupyterlab
-      # - flash-attn
+      - flash-attn
       - accelerate
       - bitsandbytes
       - transformers
