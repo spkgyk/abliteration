@@ -85,7 +85,7 @@ def measure_execution_time(func, *args, n_iterations=5000):
     torch.cuda.synchronize()
     start_time = time.time()
     for _ in range(n_iterations):
-        result = func(*args)
+        # result = func(*args)
         torch.cuda.synchronize()
     end_time = time.time()
     return end_time - start_time

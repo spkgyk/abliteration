@@ -1,10 +1,4 @@
-from transformers import (
-    AutoModelForCausalLM,
-    PreTrainedTokenizer,
-    LlamaForCausalLM,
-    GenerationConfig,
-    AutoTokenizer,
-)
+from transformers import AutoModelForCausalLM, PreTrainedTokenizer, LlamaForCausalLM, GenerationConfig, AutoTokenizer
 from typing import Union, List, Dict, Callable
 from collections import defaultdict
 from tqdm.auto import tqdm
@@ -20,6 +14,27 @@ torch.inference_mode()
 
 
 class Abliterator:
+    """
+    A class for performing targeted ablation on language models to modify their behavior.
+
+    This class implements methods to identify and modify directions in the model's weight
+    space that correspond to specific behaviors (e.g., harmful vs harmless responses).
+    It uses activation pattern analysis and targeted intervention through matrix
+    orthogonalization.
+
+    Attributes:
+        model_name (Union[str, Path]): Name or path of the pre-trained model to load
+        batch_size (int): Batch size for processing inputs
+        max_tokens_generated (int): Maximum number of tokens to generate in responses
+        device (Union[str, torch.device]): Device to run the model on
+        positive_tokens (List[str]): Tokens indicating positive/desired responses
+        negative_tokens (List[str]): Tokens indicating negative/undesired responses
+        residual_stream_points (List): Points in the residual stream to analyze
+        modified (bool): Whether the model has been modified through ablation
+        modified_layers (defaultdict): Tracks which layers have been modified
+        refusal_directions (List): Computed directions for response modification
+    """
+
     def __init__(
         self,
         model_name: Union[str, Path],
@@ -39,6 +54,18 @@ class Abliterator:
         ],
         residual_stream_points=[],
     ):
+        """
+        Initialize the Abliterator with model configuration and analysis parameters.
+
+        Args:
+            model_name: Name or path of the pre-trained model
+            batch_size: Number of samples to process at once
+            max_tokens_generated: Maximum length of generated responses
+            device: Computing device to use
+            positive_tokens: List of tokens indicating desired responses
+            negative_tokens: List of tokens indicating undesired responses
+            residual_stream_points: Points in model to collect residual stream activations
+        """
         self.model_name = model_name
         self.batch_size = batch_size
         self.max_tokens_generated = max_tokens_generated
@@ -57,6 +84,12 @@ class Abliterator:
         self._print_model_layers()
 
     def _load_model(self) -> LlamaForCausalLM:
+        """
+        Load the pre-trained language model.
+
+        Returns:
+            LlamaForCausalLM: The loaded model instance
+        """
         return AutoModelForCausalLM.from_pretrained(
             self.model_name,
             device_map=self.device,
@@ -66,30 +99,65 @@ class Abliterator:
         )
 
     def _load_tokenizer(self) -> PreTrainedTokenizer:
+        """
+        Load and configure the tokenizer for the model.
+
+        Returns:
+            PreTrainedTokenizer: The configured tokenizer instance
+        """
         tokenizer = AutoTokenizer.from_pretrained(self.model_name, trust_remote_code=True, add_bos_token=True, padding_side="left")
         tokenizer.pad_token = tokenizer.eos_token
         return tokenizer
 
     def _print_model_layers(self):
+        """Print the structure of each layer in the model for inspection."""
         for layer_idx, layer in enumerate(self.model.model.layers):
             print(f"Layer {layer_idx}:")
             print(layer)
             print("---")
 
     def encode_tokens(self, instructions: List[str]) -> torch.Tensor:
-        return self.tokenizer.apply_chat_template(
-            instructions,
-            padding=True,
-            truncation=False,
-            return_tensors="pt",
-            return_dict=True,
-            add_generation_prompt=True,
-        ).input_ids.to(self.device)
+        """
+        Encode a list of instructions into model input tokens.
+
+        Args:
+            instructions: List of text instructions to encode
+
+        Returns:
+            torch.Tensor: Encoded token ids
+        """
+        tokens = self.tokenizer.apply_chat_template(
+            instructions, padding=True, truncation=False, return_tensors="pt", return_dict=True, add_generation_prompt=True
+        )
+
+        return tokens.input_ids.to(self.device)
 
     def decode_tokens(self, tokens_batch: torch.Tensor) -> List[str]:
+        """
+        Decode a batch of tokens back into text.
+
+        Args:
+            tokens_batch: Batch of token ids to decode
+
+        Returns:
+            List[str]: Decoded text strings
+        """
         return self.tokenizer.batch_decode(tokens_batch, skip_special_tokens=True)
 
     def _register_hooks(self, activations: Dict[str, List[torch.Tensor]], position: int) -> List[Callable]:
+        """
+        Register forward hooks to collect activations from model layers.
+
+        Focuses on the top 70% of layers, collecting activations from pre-attention
+        and pre-MLP points in the residual stream.
+
+        Args:
+            activations: Dictionary to store collected activations
+            position: Position in sequence to collect activations from
+
+        Returns:
+            List[Callable]: List of registered hooks
+        """
         useful_layers = max(int(0.3 * len(self.model.model.layers)), 1)
         hooks = []
 
@@ -107,6 +175,17 @@ class Abliterator:
         return hooks
 
     def cache_activations(self, data: HarmfulHarmlessData, position: int = -1, eps: float = 1e-8):
+        """
+        Cache and analyze activations from harmful and harmless examples.
+
+        Processes both harmful and harmless datasets to compute refusal directions
+        that distinguish between these response types.
+
+        Args:
+            data: Dataset containing harmful and harmless examples
+            position: Position in sequence to analyze (-1 for last token)
+            eps: Small value to prevent division by zero
+        """
         harmful = self._process_dataset(data.harmful["train"], "harmful", position)
         harmless = self._process_dataset(data.harmless["train"], "harmless", position)
 
@@ -117,6 +196,17 @@ class Abliterator:
         clear_mem()
 
     def _process_dataset(self, dataset: List[str], dataset_name: str, position: int) -> Dict[str, torch.Tensor]:
+        """
+        Process a dataset to collect activations.
+
+        Args:
+            dataset: List of text examples to process
+            dataset_name: Name of dataset for progress tracking
+            position: Position in sequence to collect activations from
+
+        Returns:
+            Dict[str, torch.Tensor]: Collected activations
+        """
         activations = defaultdict(list)
         hooks = self._register_hooks(activations, position)
 
@@ -134,6 +224,17 @@ class Abliterator:
     def _calculate_refusal_directions(
         self, harmful: Dict[str, torch.Tensor], harmless: Dict[str, torch.Tensor], eps: float
     ) -> List[Dict[str, Union[str, torch.Tensor]]]:
+        """
+        Calculate directions that distinguish harmful from harmless responses.
+
+        Args:
+            harmful: Activations from harmful examples
+            harmless: Activations from harmless examples
+            eps: Small value to prevent division by zero
+
+        Returns:
+            List[Dict]: Computed refusal directions for each activation point
+        """
         return [
             {"cache_key": key, "refusal_direction": (harmful[key] - harmless[key]) / ((harmful[key] - harmless[key]).norm() + eps)}
             for key in self.cache_keys
@@ -147,6 +248,19 @@ class Abliterator:
         pbar: tqdm = None,
         key: str = "",
     ) -> List[str]:
+        """
+        Generate responses to a list of instructions.
+
+        Args:
+            instructions: List of input prompts
+            max_tokens_generated: Maximum length of generated responses
+            hook_fn: Optional hook function to modify generation behavior
+            pbar: Optional progress bar
+            key: Optional key for progress tracking
+
+        Returns:
+            List[str]: Generated responses
+        """
         generations = []
         hooks = []
 
@@ -181,6 +295,18 @@ class Abliterator:
         return generations
 
     def test_refusal_directions(self, instructions: List[str]):
+        """
+        Test the effectiveness of computed refusal directions.
+
+        Generates responses while applying each refusal direction to evaluate
+        their impact on model outputs.
+
+        Args:
+            instructions: List of test prompts
+
+        Returns:
+            List[Dict]: Results of testing each refusal direction
+        """
         pbar = tqdm(self.refusal_directions)
         for refusal_direction in pbar:
             args = {
@@ -193,6 +319,15 @@ class Abliterator:
         return self.refusal_directions
 
     def aggregate_best_layers(self):
+        """
+        Analyze and rank refusal directions by effectiveness.
+
+        Counts occurrences of positive tokens and absences of negative tokens
+        to determine which directions best achieve desired response patterns.
+
+        Returns:
+            List[Dict]: Sorted refusal directions with effectiveness scores
+        """
         for layer_candidate in self.refusal_directions:
             count = sum(
                 sum(word not in example for word in self.negative_tokens) + sum(word in example for word in self.positive_tokens)
@@ -211,6 +346,19 @@ class Abliterator:
         attn_out: bool = True,
         mlp_out: bool = True,
     ):
+        """
+        Apply ablation to specified model components using refusal directions.
+
+        Modifies model weights by orthogonalizing them with respect to the
+        computed refusal directions, potentially changing the model's behavior.
+
+        Args:
+            direction: Specific refusal direction to use (uses best if None)
+            layers: List of layer indices to modify (defaults to all but first)
+            emb_out: Whether to modify embedding output
+            attn_out: Whether to modify attention output
+            mlp_out: Whether to modify MLP output
+        """
         refusal_direction = direction or self.refusal_directions[0]
         refusal_direction = refusal_direction["refusal_direction"].to(self.device)
 
@@ -235,4 +383,9 @@ class Abliterator:
                 self.modified_layers[layer].append("mlp_out")
 
     def push_to_hub(self):
+        """
+        Push the modified model to the Hugging Face model hub.
+
+        The uploaded model will have '-uncensored' appended to its name.
+        """
         self.model.push_to_hub(f"{self.model_name.split('/',1)[-1]}-uncensored")
