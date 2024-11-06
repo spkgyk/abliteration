@@ -57,19 +57,19 @@ See `abliterate.ipynb` for example usage.
 
 ### Computing the Refusal Vector
 
-For a set of harmful prompts with activations $$a_{\text{harmful}}^{(i)}$$, we calculate the average projection:
+For a set of harmful prompts with activations $a_{\text{harmful}}^{(i)}$, we calculate the average projection:
 
-$$
+```math
 \text{avg\_proj}_{\text{harmful}} = \frac{1}{n} \sum_{i=1}^{n} (a_{\text{harmful}}^{(i)} \cdot \hat{r})
-$$
+```
 
 ### Modifying Harmless Prompts
 
 To force refusal on harmless inputs, we align their activations with the harmful average:
 
-$$
+```math
 a'_{\text{harmless}} = a_{\text{harmless}} - (a_{\text{harmless}} \cdot \hat{r}) \hat{r} + (\text{avg\_proj}_{\text{harmful}}) \hat{r}
-$$
+```
 
 ## Acknowledgments
 
