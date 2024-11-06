@@ -1,6 +1,6 @@
 # Abliteration
 
-A high-performance PyTorch-based library for model behavior modification through targeted feature ablation. This project is inspired by [FailSpy's abliterator](https://github.com/FailSpy/abliterator) but reimplemented without TransformerLens for improved speed and efficiency.
+This project is inspired by [FailSpy's abliterator](https://github.com/FailSpy/abliterator) but reimplemented without TransformerLens for improved speed and efficiency. I found the TransformerLens package both slow, memory hungry and limited -- only a few of the most common models were implemented. To bypass this, this repo uses PyTorch hooks to implement the same behaviour. 
 
 ## Overview
 
@@ -52,13 +52,6 @@ Note: MacOS users should comment out `pytorch-cuda` and `flash-attn` dependencie
 ## Quick Start
 
 See `abliterate.ipynb` for example usage.
-
-## Core Features
-
-- **Efficient Activation Collection**: Uses PyTorch hooks for minimal overhead
-- **Smart Memory Management**: Batch processing and automatic cleanup
-- **Flexible Direction Computation**: Supports multiple strategies for identifying behavioral directions
-- **Comprehensive Testing Tools**: Built-in evaluation functions
 
 ## Technical Details
 
