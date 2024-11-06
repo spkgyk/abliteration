@@ -53,9 +53,6 @@ Abliteration can be applied in two ways:
    - Orthogonalizes weights relative to the refusal direction
    - More efficient for production use
 
-
-## Technical Details
-
 ### Computing the Refusal Vector
 
 For a set of harmful prompts with activations $a_{\text{harmful}}^{(i)}$, we calculate the average projection:
@@ -85,5 +82,3 @@ This project is a small contribution to the fantastic work below:
 ## Contributing
 
 Contributions are welcome! If you find any issues or have improvements to suggest, please submit a PR.
-
-## License
